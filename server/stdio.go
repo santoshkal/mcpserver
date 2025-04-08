@@ -1,11 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 
@@ -15,35 +16,61 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// Define our ToolHandler type for clarity.
+// ToolHandler defines the signature for our tool functions.
 type ToolHandler func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
+// jsonRPCRequest is the structure expected for incoming JSON‑RPC requests.
+// We use the JSON‑RPC "method" value to populate the MCP
+// CallToolRequest’s Params.Name field.
+type jsonRPCRequest struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  struct {
+		Arguments map[string]interface{} `json:"arguments"`
+	} `json:"params"`
+	ID interface{} `json:"id"`
+}
+
+// jsonRPCResponse defines the structure we return for JSON‑RPC responses.
+type jsonRPCResponse struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	ID      interface{} `json:"id"`
+}
+
+var (
+	mcpServer    *server.MCPServer
+	toolHandlers = map[string]ToolHandler{}
+)
+
 func main() {
-	// Create a new MCP server instance.
-	s := server.NewMCPServer(
+	// Create and configure the MCP server.
+	mcpServer = server.NewMCPServer(
 		"MCP Tool STDIO Server",
-		"1.0.0",
+		"v1.0.0",
 		server.WithResourceCapabilities(true, true),
 		server.WithLogging(),
+		server.WithPromptCapabilities(false),
 	)
-
-	// We'll also use a mapping from tool name to handler, so we can
-	// manually dispatch calls in our custom STDIO loop.
-	toolHandlers := make(map[string]ToolHandler)
+	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
 
 	// --- Register the pull_image tool ---
-	pullImageTool := mcp.NewTool("pull_image",
+	PullImageTool := mcp.NewTool("pull_image",
 		mcp.WithDescription("Pull an image from Docker Hub"),
 		mcp.WithString("image",
 			mcp.Description("Name of the Docker image to pull (e.g., 'nginx:latest')"),
 		),
 	)
-	pullImageHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	PullImageHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Validate the "image" argument.
 		image, ok := req.Params.Arguments["image"].(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid or missing image parameter")
+		if !ok || image == "" {
+			return mcp.NewToolResultText("invalid or missing image parameter"), nil
 		}
 		fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'pull_image' with image: %s\n", image)
+
+		// Use the Docker client to pull the image.
 		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Docker client: %v", err)
@@ -53,15 +80,15 @@ func main() {
 			return nil, fmt.Errorf("failed to pull image: %v", err)
 		}
 		defer out.Close()
-		// Log Docker pull progress.
+		// Log the Docker pull progress.
 		_, err = io.Copy(os.Stderr, out)
 		if err != nil {
 			return nil, fmt.Errorf("error reading Docker pull response: %v", err)
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Image '%s' pulled successfully", image)), nil
 	}
-	s.AddTool(pullImageTool, pullImageHandler)
-	toolHandlers["pull_image"] = pullImageHandler
+	mcpServer.AddTool(PullImageTool, PullImageHandler)
+	toolHandlers["pull_image"] = PullImageHandler
 
 	// --- Register the get_pods tool ---
 	getPodsTool := mcp.NewTool("get_pods",
@@ -76,7 +103,7 @@ func main() {
 		}
 		return mcp.NewToolResultText(string(output)), nil
 	}
-	s.AddTool(getPodsTool, getPodsHandler)
+	mcpServer.AddTool(getPodsTool, getPodsHandler)
 	toolHandlers["get_pods"] = getPodsHandler
 
 	// --- Register the git_init tool ---
@@ -88,7 +115,7 @@ func main() {
 	)
 	gitInitHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		directory, ok := req.Params.Arguments["directory"].(string)
-		if !ok {
+		if !ok || directory == "" {
 			return nil, fmt.Errorf("invalid or missing directory parameter")
 		}
 		fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'git_init' with directory: %s\n", directory)
@@ -99,7 +126,7 @@ func main() {
 		}
 		return mcp.NewToolResultText(string(output)), nil
 	}
-	s.AddTool(gitInitTool, gitInitHandler)
+	mcpServer.AddTool(gitInitTool, gitInitHandler)
 	toolHandlers["git_init"] = gitInitHandler
 
 	// --- Register the create_table tool ---
@@ -118,11 +145,11 @@ func main() {
 	)
 	createTableHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tableName, ok := req.Params.Arguments["table_name"].(string)
-		if !ok {
+		if !ok || tableName == "" {
 			return nil, fmt.Errorf("invalid or missing table_name parameter")
 		}
 		headers, ok := req.Params.Arguments["headers"].(string)
-		if !ok {
+		if !ok || headers == "" {
 			return nil, fmt.Errorf("invalid or missing headers parameter")
 		}
 		values, ok := req.Params.Arguments["values"].(string)
@@ -138,73 +165,88 @@ func main() {
 		}
 		return mcp.NewToolResultText(string(output)), nil
 	}
-	s.AddTool(createTableTool, createTableHandler)
+	mcpServer.AddTool(createTableTool, createTableHandler)
 	toolHandlers["create_table"] = createTableHandler
 
-	// Begin our custom STDIO loop.
-	fmt.Fprintln(os.Stderr, "[DEBUG] Starting custom MCP STDIO server")
-	reader := bufio.NewReader(os.Stdin)
-	encoder := json.NewEncoder(os.Stdout)
-
-	for {
-		// Read one line (one JSON object) from STDIN.
-		rawInput, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				fmt.Fprintln(os.Stderr, "[DEBUG] End of STDIN stream")
-				break
-			}
-			fmt.Fprintf(os.Stderr, "[ERROR] Reading STDIN: %v\n", err)
-			continue
+	// Start HTTP JSON‑RPC endpoint on /rpc.
+	http.HandleFunc("/rpc", rpcHandler)
+	go func() {
+		fmt.Println("HTTP JSON‑RPC server started on port 1234")
+		if err := http.ListenAndServe(":1234", nil); err != nil {
+			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
+			os.Exit(1)
 		}
-		// Print the raw input.
-		fmt.Fprintf(os.Stderr, "[DEBUG] Raw input: %s\n", string(rawInput))
+	}()
 
-		// Unmarshal the JSON input into CallToolRequest.
-		var req mcp.CallToolRequest
-		if err := json.Unmarshal(rawInput, &req); err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] Failed to decode JSON: %v\n", err)
-			continue
-		}
-
-		// Debug-print the decoded request.
-		reqDump, _ := json.MarshalIndent(req, "", "  ")
-		fmt.Fprintf(os.Stderr, "[DEBUG] Decoded request:\n%s\n", reqDump)
-		fmt.Fprintf(os.Stderr, "[DEBUG] Fields: top-level Method='%s', Params.Name='%s', Params.Arguments=%+v\n",
-			req.Method, req.Params.Name, req.Params.Arguments)
-
-		// If Params.Name is empty, fall back to the top-level Method.
-		if req.Params.Name == "" && req.Method != "" {
-			fmt.Fprintf(os.Stderr, "[DEBUG] Falling back: setting Params.Name from top-level Method '%s'\n", req.Method)
-			req.Params.Name = req.Method
-		}
-
-		// Look up the tool handler by name.
-		handler, found := toolHandlers[req.Params.Name]
-		if !found {
-			errMsg := fmt.Sprintf("Method '%s' not found", req.Params.Name)
-			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", errMsg)
-			encoder.Encode(mcp.NewToolResultText(errMsg))
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "[DEBUG] Found handler for method '%s'\n", req.Params.Name)
-
-		// Invoke the handler.
-		result, err := handler(context.Background(), req)
-		if err != nil {
-			errText := fmt.Sprintf("Error executing tool: %v", err)
-			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", errText)
-			encoder.Encode(mcp.NewToolResultText(errText))
-			continue
-		}
-
-		// Debug-print the result.
-		resultDump, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Fprintf(os.Stderr, "[DEBUG] Response:\n%s\n", resultDump)
-
-		// Write the JSON response.
-		if err := encoder.Encode(result); err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] Failed to encode response: %v\n", err)
-		}
+	// Optionally, start the SSE server on another port (1235).
+	sseServer := server.NewSSEServer(mcpServer)
+	if err := sseServer.Start(":1235"); err != nil {
+		fmt.Fprintf(os.Stderr, "SSE server error: %v\n", err)
 	}
+
+	// Block forever.
+	select {}
+}
+
+func rpcHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST supported", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Cannot read request body", http.StatusBadRequest)
+		return
+	}
+
+	var req jsonRPCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Look up the appropriate tool handler.
+	handler, ok := toolHandlers[req.Method]
+	if !ok {
+		http.Error(w, "Unknown method", http.StatusNotFound)
+		return
+	}
+
+	// Create an MCP CallToolRequest, mapping the JSON‑RPC "method"
+	// to the Params.Name field and the provided arguments accordingly.
+	var toolReq mcp.CallToolRequest
+	toolReq.Params.Name = req.Method
+	toolReq.Params.Arguments = req.Params.Arguments
+
+	// Invoke the tool handler.
+	result, err := handler(context.Background(), toolReq)
+	var resp jsonRPCResponse
+	resp.JSONRPC = "2.0"
+	resp.ID = req.ID
+	if err != nil {
+		resp.Error = err.Error()
+	} else {
+		// Extract output text from the Content field.
+		var output string
+		if len(result.Content) > 0 {
+			// Assume the text content is of type *mcp.TextContent.
+			if tc, ok := result.Content[0].(*mcp.TextContent); ok {
+				output = tc.Text
+			} else {
+				// Fallback if the type assertion doesn't match.
+				output = fmt.Sprintf("%v", result.Content[0])
+			}
+		}
+		resp.Result = output
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func handleNotification(ctx context.Context, notification mcp.JSONRPCNotification) {
+	fmt.Printf("Received notification from client: %s\n", notification.Method)
 }
