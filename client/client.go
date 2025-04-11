@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -7,13 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/openai"
 )
 
-// Custom error types.
 type SSEClientCreationError struct{ Message string }
 
 func (e *SSEClientCreationError) Error() string { return e.Message }
@@ -38,14 +40,14 @@ type SSEResultExtractionError struct{ Message string }
 
 func (e *SSEResultExtractionError) Error() string { return e.Message }
 
-// Tool is a simplified type to represent a tool.
+// Tool is our simplified representation of an MCP tool.
 type Tool struct {
 	Name        string
 	Description string
+	// (Additional fields like InputSchema can be added here.)
 }
 
-// ConvertMCPTools converts a slice of mcp.Tool (from the SDK) into a slice of Tool.
-// Adjust this based on your actual mcp.Tool fields.
+// ConvertMCPTools converts a slice of mcp.Tool (from the SDK) into our Tool slice.
 func ConvertMCPTools(mcpTools []mcp.Tool) []Tool {
 	var tools []Tool
 	for _, t := range mcpTools {
@@ -57,17 +59,16 @@ func ConvertMCPTools(mcpTools []mcp.Tool) []Tool {
 	return tools
 }
 
-// Client is a simple MCP client.
+// Client wraps the mcp.SSEMCPClient.
 type Client struct {
 	mcpClient *client.SSEMCPClient
 	BaseURL   string
 	ctx       context.Context
 }
 
-// NewClient creates a new MCP client without appending extra path parts.
-// Pass the complete URL (e.g. "http://localhost:1234/rpc") as baseURL.
+// NewClient creates a new MCP client. (Pass the full SSE endpoint URL,
+// e.g. "http://localhost:1234/sse")
 func NewClient(ctx context.Context, baseURL string) (Client, error) {
-	// Notice: we use baseURL directly without appending "/sse"
 	mcpClient, err := client.NewSSEMCPClient(baseURL)
 	if err != nil {
 		return Client{}, &SSEClientCreationError{Message: fmt.Sprintf("Failed to create client: %v", err)}
@@ -79,7 +80,7 @@ func NewClient(ctx context.Context, baseURL string) (Client, error) {
 	}, nil
 }
 
-// Start starts the MCP client.
+// Start begins the SSE connection.
 func (c *Client) Start() error {
 	if err := c.mcpClient.Start(c.ctx); err != nil {
 		return &SSEClientStartError{Message: fmt.Sprintf("Failed to start client: %v", err)}
@@ -87,12 +88,12 @@ func (c *Client) Start() error {
 	return nil
 }
 
-// Initialize sends an InitializeRequest to the server.
+// Initialize sends an initialization request to the MCP server.
 func (c *Client) Initialize() (*mcp.InitializeResult, error) {
 	var initRequest mcp.InitializeRequest
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "genval mcp client",
+		Name:    "parakeet mcp client",
 		Version: "1.0.0",
 	}
 	initResult, err := c.mcpClient.Initialize(c.ctx, initRequest)
@@ -102,34 +103,23 @@ func (c *Client) Initialize() (*mcp.InitializeResult, error) {
 	return initResult, nil
 }
 
-// ListTools requests the list of available tools from the server.
+// ListTools retrieves available tools from the MCP server.
 func (c *Client) ListTools() ([]Tool, error) {
 	var toolsRequest mcp.ListToolsRequest
 	mcpTools, err := c.mcpClient.ListTools(c.ctx, toolsRequest)
 	if err != nil {
 		return nil, &SSEGetToolsError{Message: fmt.Sprintf("Failed to list tools: %v", err)}
 	}
-	converted := ConvertMCPTools(mcpTools.Tools)
-	return converted, nil
+	return ConvertMCPTools(mcpTools.Tools), nil
 }
 
-// ListToolsFull returns the complete mcp.ListToolsResult for full JSON output.
-func (c *Client) ListToolsFull() (*mcp.ListToolsResult, error) {
-	var toolsRequest mcp.ListToolsRequest
-	mcpTools, err := c.mcpClient.ListTools(c.ctx, toolsRequest)
-	if err != nil {
-		return nil, &SSEGetToolsError{Message: fmt.Sprintf("Failed to list tools: %v", err)}
-	}
-	return mcpTools, nil
-}
-
-// CallToolResult holds the output of a tool call.
+// CallToolResult represents the output of a tool invocation.
 type CallToolResult struct {
 	Text string
 	Type string
 }
 
-// CallTool calls a tool with the given name and arguments.
+// CallTool invokes a tool with the given name and arguments.
 func (c *Client) CallTool(functionName string, arguments map[string]interface{}) (CallToolResult, error) {
 	toolRequest := mcp.CallToolRequest{
 		Request: mcp.Request{
@@ -143,33 +133,27 @@ func (c *Client) CallTool(functionName string, arguments map[string]interface{})
 	if err != nil {
 		return CallToolResult{}, &SSEToolCallError{Message: fmt.Sprintf("Failed to call tool: %v", err)}
 	}
-
 	text, err := getTextFromResult(mcpResult)
 	if err != nil {
 		return CallToolResult{}, &SSEToolCallError{Message: fmt.Sprintf("Failed to extract text from result: %v", err)}
 	}
-
-	// Assume the result is text.
 	return CallToolResult{Text: text, Type: "text"}, nil
 }
 
-// Close closes the client connection.
+// Close shuts down the MCP client connection.
 func (c *Client) Close() error {
 	return c.mcpClient.Close()
 }
 
+// getTextFromResult extracts the text from an mcp.CallToolResult.
+// First a direct type assertion is attempted; if that fails, it marshals the content to JSON and extracts the "text" field.
 func getTextFromResult(mcpResult *mcp.CallToolResult) (string, error) {
 	if len(mcpResult.Content) == 0 {
 		return "", &SSEResultExtractionError{Message: "content is empty"}
 	}
-
-	// First, try to see if the content is of the expected concrete type.
 	if tc, ok := mcpResult.Content[0].(*mcp.TextContent); ok {
 		return tc.Text, nil
 	}
-
-	// Fallback: because the content was serialized/deserialized, it may now be a generic map.
-	// We marshal the content back to JSON and unmarshal it into a map.
 	fallbackJSON, err := json.Marshal(mcpResult.Content[0])
 	if err != nil {
 		return "", &SSEResultExtractionError{Message: fmt.Sprintf("failed to marshal content: %v", err)}
@@ -184,72 +168,247 @@ func getTextFromResult(mcpResult *mcp.CallToolResult) (string, error) {
 	return "", &SSEResultExtractionError{Message: "unexpected content format"}
 }
 
-// Main function: processes flags to list tools or call a tool.
+// ToolCall defines the JSON structure expected from the LLM for a tool call.
+type ToolCall struct {
+	Tool      string                 `json:"tool"`
+	Arguments map[string]interface{} `json:"arguments"`
+}
+
+// convertToLLMTools converts our MCP Tools to langchaingo's llms.Tool format.
+func convertToLLMTools(tools []Tool) []llms.Tool {
+	var llmTools []llms.Tool
+	for _, t := range tools {
+		var parameters map[string]any
+		switch t.Name {
+		case "pull_image":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"image": map[string]any{
+						"type":        "string",
+						"description": "The Docker image to pull (e.g., 'nginx:latest')",
+					},
+				},
+				"required": []string{"image"},
+			}
+		case "get_pods":
+			parameters = map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			}
+		case "git_init":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"directory": map[string]any{
+						"type":        "string",
+						"description": "The directory to initialize git",
+					},
+				},
+				"required": []string{"directory"},
+			}
+		case "create_table":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"table_name": map[string]any{
+						"type":        "string",
+						"description": "The name of the table to create",
+					},
+					"headers": map[string]any{
+						"type":        "string",
+						"description": "Comma-separated column definitions",
+					},
+					"values": map[string]any{
+						"type":        "string",
+						"description": "Comma-separated list of values to insert",
+					},
+				},
+				"required": []string{"table_name", "headers"},
+			}
+		default:
+			parameters = map[string]any{
+				"type": "object",
+			}
+		}
+		llmTool := llms.Tool{
+			Type: "function",
+			Function: &llms.FunctionDefinition{
+				// Instruct the model to return the function name exactly as defined here (e.g., "pull_image").
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  parameters,
+			},
+		}
+		llmTools = append(llmTools, llmTool)
+	}
+	return llmTools
+}
+
+// updateMessageHistory appends the assistant's response (including any tool call parts) to the history.
+func updateMessageHistory(history []llms.MessageContent, resp *llms.ContentResponse) []llms.MessageContent {
+	assistantResponse := llms.TextParts(llms.ChatMessageTypeAI, resp.Choices[0].Content)
+	for _, tc := range resp.Choices[0].ToolCalls {
+		assistantResponse.Parts = append(assistantResponse.Parts, tc)
+	}
+	return append(history, assistantResponse)
+}
+
+// executeToolCalls iterates over tool calls from the LLM response.
+// If ToolCalls array is empty, it attempts to parse resp.Choices[0].Content as JSON to extract tool and arguments.
+func executeToolCalls(ctx context.Context, mcpClient *Client, history []llms.MessageContent, resp *llms.ContentResponse) []llms.MessageContent {
+	if len(resp.Choices[0].ToolCalls) == 0 {
+		fmt.Println("No ToolCalls found in the response; parsing content for tool call details.")
+		var toolCall ToolCall
+		if err := json.Unmarshal([]byte(resp.Choices[0].Content), &toolCall); err != nil {
+			log.Fatalf("Error parsing content for tool call: %v", err)
+		}
+		if strings.ToLower(toolCall.Tool) == "none" {
+			fmt.Println("LLM determined no tool should be called.")
+			return history
+		}
+		// Strip any "functions." prefix, if present.
+		if strings.HasPrefix(toolCall.Tool, "functions.") {
+			toolCall.Tool = strings.TrimPrefix(toolCall.Tool, "functions.")
+		}
+		fmt.Printf("Parsed tool call from content: %s\n", toolCall.Tool)
+		toolResult, err := mcpClient.CallTool(toolCall.Tool, toolCall.Arguments)
+		if err != nil {
+			log.Fatalf("Error calling tool %s: %v", toolCall.Tool, err)
+		}
+		fmt.Printf("Tool %s returned: %s\n", toolCall.Tool, toolResult.Text)
+		// Append the tool response to history.
+		toolResponseMsg := llms.MessageContent{
+			Role: llms.ChatMessageTypeTool,
+			Parts: []llms.ContentPart{
+				llms.ToolCallResponse{
+					ToolCallID: "", // No ID parsed
+					Name:       toolCall.Tool,
+					Content:    toolResult.Text,
+				},
+			},
+		}
+		history = append(history, toolResponseMsg)
+		return history
+	}
+
+	// Otherwise, iterate over each tool call in the array.
+	for i := range resp.Choices[0].ToolCalls {
+		tc := &resp.Choices[0].ToolCalls[i]
+		if strings.HasPrefix(tc.FunctionCall.Name, "functions.") {
+			tc.FunctionCall.Name = strings.TrimPrefix(tc.FunctionCall.Name, "functions.")
+		}
+		toolName := tc.FunctionCall.Name
+		fmt.Printf("LLM requested tool call: %s\n", toolName)
+		var args map[string]interface{}
+		if err := json.Unmarshal([]byte(tc.FunctionCall.Arguments), &args); err != nil {
+			log.Fatalf("Error parsing tool call arguments: %v", err)
+		}
+		toolResult, err := mcpClient.CallTool(toolName, args)
+		if err != nil {
+			log.Fatalf("Error calling tool %s: %v", toolName, err)
+		}
+		fmt.Printf("Tool %s returned: %s\n", toolName, toolResult.Text)
+		toolResponseMsg := llms.MessageContent{
+			Role: llms.ChatMessageTypeTool,
+			Parts: []llms.ContentPart{
+				llms.ToolCallResponse{
+					ToolCallID: tc.ID,
+					Name:       toolName,
+					Content:    toolResult.Text,
+				},
+			},
+		}
+		history = append(history, toolResponseMsg)
+	}
+	return history
+}
+
 func main() {
-	baseURL := flag.String("baseurl", "http://localhost:1234/rpc", "Base URL for the MCP server")
-	command := flag.String("command", "list", "Command: list or call")
-	toolName := flag.String("tool", "", "Tool name (for call command)")
-	argsJSON := flag.String("args", "{}", "Arguments in JSON format (for call command)")
-	fullJSON := flag.Bool("json", false, "Output full ListToolsResult JSON (only used with command=list)")
+	// Flags for MCP server SSE endpoint and user prompt.
+	baseURL := flag.String("baseurl", "http://localhost:1234/sse", "Base URL for the MCP server SSE endpoint")
+	userPrompt := flag.String("prompt", "", "Natural language prompt for tool invocation")
 	flag.Parse()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if *userPrompt == "" {
+		log.Fatal("Please provide a prompt using -prompt")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, *baseURL)
+	mcpClient, err := NewClient(ctx, *baseURL)
 	if err != nil {
-		log.Fatalf("Error creating client: %v", err)
+		log.Fatalf("Error creating MCP client: %v", err)
 	}
-	defer client.Close()
+	defer mcpClient.Close()
 
-	if err := client.Start(); err != nil {
-		log.Fatalf("Error starting client: %v", err)
+	if err := mcpClient.Start(); err != nil {
+		log.Fatalf("Error starting MCP client: %v", err)
 	}
 
-	initResult, err := client.Initialize()
+	initResult, err := mcpClient.Initialize()
 	if err != nil {
-		log.Fatalf("Error initializing client: %v", err)
+		log.Fatalf("Error initializing MCP client: %v", err)
 	}
-	fmt.Printf("Initialization succeeded: %+v\n", initResult)
+	fmt.Printf("MCP Client Initialized: %+v\n", initResult)
 
-	switch *command {
-	case "list":
-		if *fullJSON {
-			// Fetch the complete ListToolsResult and print its JSON.
-			toolsResult, err := client.ListToolsFull()
-			if err != nil {
-				log.Fatalf("Error listing tools: %v", err)
-			}
-			jsonBytes, err := json.MarshalIndent(toolsResult, "", "  ")
-			if err != nil {
-				log.Fatalf("Error marshaling tools result: %v", err)
-			}
-			fmt.Println("Complete ListToolsResult in JSON:")
-			fmt.Println(string(jsonBytes))
-		} else {
-			tools, err := client.ListTools()
-			if err != nil {
-				log.Fatalf("Error listing tools: %v", err)
-			}
-			fmt.Println("Available Tools:")
-			for _, t := range tools {
-				fmt.Printf(" - %s: %s\n", t.Name, t.Description)
-			}
-		}
-	case "call":
-		if *toolName == "" {
-			log.Fatalf("Tool name must be provided for 'call' command")
-		}
-		var arguments map[string]interface{}
-		if err := json.Unmarshal([]byte(*argsJSON), &arguments); err != nil {
-			log.Fatalf("Error parsing args JSON: %v", err)
-		}
-		result, err := client.CallTool(*toolName, arguments)
-		if err != nil {
-			log.Fatalf("Error calling tool: %v", err)
-		}
-		fmt.Printf("CallTool result: %s\n", result.Text)
-	default:
-		log.Fatalf("Unknown command: %s", *command)
+	availableMCPTools, err := mcpClient.ListTools()
+	if err != nil {
+		log.Fatalf("Error listing MCP tools: %v", err)
 	}
+	fmt.Println("Available MCP Tools:")
+	for _, t := range availableMCPTools {
+		fmt.Printf(" - %s: %s\n", t.Name, t.Description)
+	}
+	llmTools := convertToLLMTools(availableMCPTools)
+
+	toolListStr := ""
+	for _, t := range availableMCPTools {
+		toolListStr += fmt.Sprintf("- %s: %s\n", t.Name, t.Description)
+	}
+	systemPrompt := fmt.Sprintf(`You are a function-calling assistant.
+You have access to the following functions:
+%s
+When deciding which function to call, return the result as JSON exactly in the following format:
+{"tool": "<tool name>", "arguments": { ... } }
+Do NOT prefix the tool name with any extra text (for example, do not include "functions.").
+If no function is appropriate, return {"tool": "none", "arguments": {}}.`, toolListStr)
+
+	// 4. Initialize the message history with system and user messages.
+	messageHistory := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+		llms.TextParts(llms.ChatMessageTypeHuman, *userPrompt),
+	}
+
+	// 5. Initialize the OpenAI LLM client with function calling support.
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		log.Fatal("Please set the OPENAI_API_KEY environment variable")
+	}
+	llm, err := openai.New(openai.WithModel("gpt-4"), openai.WithToken(apiKey))
+	if err != nil {
+		log.Fatalf("Error creating OpenAI client: %v", err)
+	}
+
+	// 6. Generate the initial LLM response with available tools.
+	resp, err := llm.GenerateContent(ctx, messageHistory, llms.WithTools(llmTools))
+	if err != nil {
+		log.Fatalf("Error during LLM query: %v", err)
+	}
+	fmt.Println("LLM initial response:")
+	fmt.Println(resp.Choices[0].Content)
+
+	messageHistory = updateMessageHistory(messageHistory, resp)
+
+	messageHistory = executeToolCalls(ctx, &mcpClient, messageHistory, resp)
+
+	// 9. For a final summary, append a follow-up message instructing the model to provide a summary.
+	// messageHistory = append(messageHistory, llms.TextParts(llms.ChatMessageTypeHuman, "Please provide a final summary of the tool outputs in plain text, without calling any functions."))
+	// finalResp, err := llm.GenerateContent(ctx, messageHistory)
+	// if err != nil {
+	// 	log.Fatalf("Error during follow-up LLM query: %v", err)
+	// }
+	// fmt.Println("Final LLM response:")
+	// fmt.Println(finalResp.Choices[0].Content)
 }
