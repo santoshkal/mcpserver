@@ -54,6 +54,48 @@ func main() {
 	)
 	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
 
+	// --- Register the MarkitDown tool ---
+
+	markItDownTool := mcp.NewTool("to-markdown",
+		mcp.WithDescription("Converts the provided input file to Markdown"),
+		mcp.WithString("input",
+			mcp.Required(),
+			mcp.Description("The path to the input file"),
+		),
+		mcp.WithString("output",
+			mcp.Required(),
+			mcp.Description("The path to the output file"),
+		),
+	)
+	markItDownHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Validate the "input" and "output" arguments.
+		input, ok := req.Params.Arguments["input"].(string)
+		if !ok || input == "" {
+			return mcp.NewToolResultText("invalid or missing input parameter"), nil
+		}
+		output, ok := req.Params.Arguments["output"].(string)
+		if !ok || output == "" {
+			return mcp.NewToolResultText("invalid or missing output parameter"), nil
+		}
+		// TODO: Implememt the MarkitDown CLI Command using exec.Command() to run the tool
+		cmd := exec.Command("markitdown", input, "-o", output)
+		outBytes, err := cmd.CombinedOutput()
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("failed to run markitdown: %v\nOutput: %s", err, string(outBytes))), nil
+		}
+
+		// Optionally, read the content of the output file to return its content.
+		data, err := os.ReadFile(output)
+		if err != nil {
+			// If we cannot read the file, report that conversion succeeded.
+			return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output file created at '%s', but failed to read file: %v", output, err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output:\n%s", string(data))), nil
+	}
+
+	mcpServer.AddTool(markItDownTool, markItDownHandler)
+	toolHandlers["to-markdown"] = markItDownHandler
+
 	// --- Register the pull_image tool ---
 	PullImageTool := mcp.NewTool("pull_image",
 		mcp.WithDescription("Pull an image from Docker Hub"),

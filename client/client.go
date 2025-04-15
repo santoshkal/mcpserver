@@ -226,6 +226,21 @@ func convertToLLMTools(tools []Tool) []llms.Tool {
 				},
 				"required": []string{"table_name", "headers"},
 			}
+		case "to-markdown":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"input": map[string]any{
+						"type":        "string",
+						"description": "The path to the input file",
+					},
+					"output": map[string]any{
+						"type":        "string",
+						"description": "The path to the output file",
+					},
+				},
+				"required": []string{"input", "output"},
+			}
 		default:
 			parameters = map[string]any{
 				"type": "object",
