@@ -207,6 +207,29 @@ func convertToLLMTools(tools []Tool) []llms.Tool {
 				},
 				"required": []string{"directory"},
 			}
+		case "ast-grep":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "The pattern to use for the AST search",
+					},
+					"new-pattern": map[string]any{
+						"type":        "string",
+						"description": "The new-pattern to replace the original pattern",
+					},
+					"path": map[string]any{
+						"type":        "string",
+						"description": "The path to the file/diretcory to search",
+					},
+					"language": map[string]any{
+						"type":        "string",
+						"description": "The programming language to use for the AST search and replace",
+					},
+				},
+				"required": []string{"pattern", "new-pattern", "path"},
+			}
 		case "create_table":
 			parameters = map[string]any{
 				"type": "object",

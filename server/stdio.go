@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 
 	img "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -84,17 +85,98 @@ func main() {
 			return mcp.NewToolResultText(fmt.Sprintf("failed to run markitdown: %v\nOutput: %s", err, string(outBytes))), nil
 		}
 
-		// Optionally, read the content of the output file to return its content.
-		data, err := os.ReadFile(output)
-		if err != nil {
-			// If we cannot read the file, report that conversion succeeded.
-			return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output file created at '%s', but failed to read file: %v", output, err)), nil
-		}
-		return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output:\n%s", string(data))), nil
+		return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output:\n%s", output)), nil
 	}
 
 	mcpServer.AddTool(markItDownTool, markItDownHandler)
 	toolHandlers["to-markdown"] = markItDownHandler
+
+	// Register ast-grep tool
+	searchCodeTool := mcp.NewTool("ast-grep",
+		mcp.WithDescription("Search for code in a file"),
+		mcp.WithString("pattern",
+			mcp.Required(),
+			mcp.Description("The pattern to search for"),
+		),
+		mcp.WithString("new-pattern",
+			mcp.Required(),
+			mcp.Description("The pattern to replace with"),
+		),
+		mcp.WithString("language",
+			mcp.Required(),
+			mcp.Description("The language to search in"),
+		),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("The path to the file/directory to search in"),
+		),
+	)
+	searchCodeHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// 1. Validate
+		pattern, ok := req.Params.Arguments["pattern"].(string)
+		if !ok || pattern == "" {
+			return mcp.NewToolResultText("invalid or missing 'pattern' parameter"), nil
+		}
+		newPattern, ok := req.Params.Arguments["new-pattern"].(string)
+		if !ok || newPattern == "" {
+			return mcp.NewToolResultText("invalid or missing 'new-pattern' parameter"), nil
+		}
+		lang, ok := req.Params.Arguments["language"].(string)
+		if !ok || lang == "" {
+			return mcp.NewToolResultText("invalid or missing 'language' parameter"), nil
+		}
+		pathParam, ok := req.Params.Arguments["path"].(string)
+		if !ok || pathParam == "" {
+			return mcp.NewToolResultText("invalid or missing 'path' parameter"), nil
+		}
+
+		// 2. Split paths (comma or space)
+		var paths []string
+		if strings.Contains(pathParam, ",") {
+			for _, p := range strings.Split(pathParam, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					paths = append(paths, t)
+				}
+			}
+		} else {
+			paths = strings.Fields(pathParam)
+		}
+
+		// 3. Build CLI args
+		args := []string{
+			"--pattern", pattern,
+			"--rewrite", newPattern,
+			"--lang", lang,
+		}
+		args = append(args, paths...)
+
+		// 4. Run ast-grep
+		outBytes, err := exec.Command("ast-grep", args...).CombinedOutput()
+		out := strings.TrimSpace(string(outBytes))
+
+		// 5. If the CLI itself errored *and* produced no output, treat as “no matches”
+		if err != nil && out == "" {
+			msg := fmt.Sprintf("No occurrences of '%s' found in %v", pattern, paths)
+			return mcp.NewToolResultText(msg), nil
+		}
+		// 6. If the CLI errored *with* some output, return that as the text
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ast-grep error: %v\n\n%s", err, out)), nil
+		}
+		// 7. If CLI succeeded but no matches, still say so
+		if out == "" {
+			msg := fmt.Sprintf("No occurrences of '%s' found in %v", pattern, paths)
+			return mcp.NewToolResultText(msg), nil
+		}
+		// 8. Otherwise return the real diff/matches
+		return mcp.NewToolResultText(out), nil
+	}
+
+	mcpServer.AddTool(searchCodeTool, searchCodeHandler)
+	toolHandlers["ast-grep"] = searchCodeHandler
+
+	mcpServer.AddTool(searchCodeTool, searchCodeHandler)
+	toolHandlers["ast-grep"] = searchCodeHandler
 
 	// --- Register the pull_image tool ---
 	PullImageTool := mcp.NewTool("pull_image",
