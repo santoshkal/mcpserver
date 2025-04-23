@@ -238,13 +238,13 @@ func convertToLLMTools(tools []Tool) []llms.Tool {
 						"type":        "string",
 						"description": "The name of the table to create",
 					},
-					"headers": map[string]any{
-						"type":        "string",
-						"description": "Comma-separated column definitions",
-					},
 					"values": map[string]any{
 						"type":        "string",
 						"description": "Comma-separated list of values to insert",
+					},
+					"headers": map[string]any{
+						"type":        "string",
+						"description": "Comma-separated column definitions",
 					},
 				},
 				"required": []string{"table_name", "headers"},

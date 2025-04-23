@@ -68,7 +68,7 @@ func main() {
 			mcp.Description("The path to the output file"),
 		),
 	)
-	markItDownHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	MarkItDownHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Validate the "input" and "output" arguments.
 		input, ok := req.Params.Arguments["input"].(string)
 		if !ok || input == "" {
@@ -88,8 +88,8 @@ func main() {
 		return mcp.NewToolResultText(fmt.Sprintf("Conversion successful. Output:\n%s", output)), nil
 	}
 
-	mcpServer.AddTool(markItDownTool, markItDownHandler)
-	toolHandlers["to-markdown"] = markItDownHandler
+	mcpServer.AddTool(markItDownTool, MarkItDownHandler)
+	toolHandlers["to-markdown"] = MarkItDownHandler
 
 	// Register ast-grep tool
 	searchCodeTool := mcp.NewTool("ast-grep",
@@ -147,36 +147,66 @@ func main() {
 			"--pattern", pattern,
 			"--rewrite", newPattern,
 			"--lang", lang,
+			"-U",
 		}
 		args = append(args, paths...)
 
-		// 4. Run ast-grep
+		//  Run ast-grep
 		outBytes, err := exec.Command("ast-grep", args...).CombinedOutput()
 		out := strings.TrimSpace(string(outBytes))
 
-		// 5. If the CLI itself errored *and* produced no output, treat as “no matches”
+		// If the CLI itself errored *and* produced no output, treat as “no matches”
 		if err != nil && out == "" {
 			msg := fmt.Sprintf("No occurrences of '%s' found in %v", pattern, paths)
 			return mcp.NewToolResultText(msg), nil
 		}
-		// 6. If the CLI errored *with* some output, return that as the text
+		// If the CLI errored *with* some output, return that as the text
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("ast-grep error: %v\n\n%s", err, out)), nil
 		}
-		// 7. If CLI succeeded but no matches, still say so
+		// If CLI succeeded but no matches, still say so
 		if out == "" {
 			msg := fmt.Sprintf("No occurrences of '%s' found in %v", pattern, paths)
 			return mcp.NewToolResultText(msg), nil
 		}
-		// 8. Otherwise return the real diff/matches
+		// Otherwise return the real diff/matches
 		return mcp.NewToolResultText(out), nil
 	}
 
 	mcpServer.AddTool(searchCodeTool, searchCodeHandler)
 	toolHandlers["ast-grep"] = searchCodeHandler
 
-	mcpServer.AddTool(searchCodeTool, searchCodeHandler)
-	toolHandlers["ast-grep"] = searchCodeHandler
+	// Add Mirrord tool
+	mirrordTool := mcp.NewTool("mirrord-exec",
+		mcp.WithDescription("Run `mirrord exec` using a given config file"),
+		mcp.WithString("config",
+			mcp.Required(),
+			mcp.Description("Path to the mirrord JSON config file"),
+		),
+	)
+
+	mirrordHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Validate config param
+		cfg, ok := req.Params.Arguments["config"].(string)
+		if !ok || cfg == "" {
+			return mcp.NewToolResultText("invalid or missing 'config' parameter"), nil
+		}
+
+		// Build and run: mirrord exec --config=<cfg>
+		cmd := exec.Command("mirrord", "exec", "--config="+cfg)
+		out, err := cmd.CombinedOutput()
+		text := string(out)
+
+		if err != nil {
+			return mcp.NewToolResultText(
+				fmt.Sprintf("mirrord exec failed: %v\n\n%s", err, text),
+			), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	}
+
+	mcpServer.AddTool(mirrordTool, mirrordHandler)
+	toolHandlers["mirrord-exec"] = mirrordHandler
 
 	// --- Register the pull_image tool ---
 	PullImageTool := mcp.NewTool("pull_image",
