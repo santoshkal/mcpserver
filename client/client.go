@@ -264,6 +264,70 @@ func convertToLLMTools(tools []Tool) []llms.Tool {
 				},
 				"required": []string{"input", "output"},
 			}
+		case "read-query":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"db": map[string]any{
+						"type":        "string",
+						"description": "path to the .db file",
+					},
+					"query": map[string]any{
+						"type":        "string",
+						"description": "The SELECT query to run",
+					},
+				},
+			}
+
+		case "write-query":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"db": map[string]any{
+						"type":        "string",
+						"description": "path to the .db file",
+					},
+					"query": map[string]any{
+						"type":        "string",
+						"description": "The NON-SELECT query to run",
+					},
+				},
+			}
+		case "list-tables":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"db": map[string]any{
+						"type":        "string",
+						"description": "path to the .db file",
+					},
+				},
+			}
+		case "create-SQLtable":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"db": map[string]any{
+						"type":        "string",
+						"description": "Path to the .db file",
+					},
+					"definition": map[string]any{
+						"type":        "string",
+						"description": "SQL CREATE TABLE statement",
+					},
+				},
+				"required": []string{"db", "definition"},
+			}
+		case "mirrord-exec":
+			parameters = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"config": map[string]any{
+						"type":        "string",
+						"description": "Path to the mirrord config file",
+					},
+				},
+			}
 		default:
 			parameters = map[string]any{
 				"type": "object",

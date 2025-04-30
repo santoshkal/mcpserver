@@ -321,6 +321,108 @@ func main() {
 	mcpServer.AddTool(createTableTool, createTableHandler)
 	toolHandlers["create_table"] = createTableHandler
 
+	readQueryTool := mcp.NewTool("read-query",
+		mcp.WithDescription("Execute a SELECT query on a SQLite DB (returns CSV)"),
+		mcp.WithString("db",
+			mcp.Required(),
+			mcp.Description("Path to the .db file"),
+		),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The SELECT SQL to run"),
+		),
+	)
+	readQueryHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		db, _ := req.Params.Arguments["db"].(string)
+		q, _ := req.Params.Arguments["query"].(string)
+		cmd := exec.Command("sqlite3", "-csv", db, q)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return mcp.NewToolResultText(
+				fmt.Sprintf("read-query failed: %v\n\n%s", err, string(out)),
+			), nil
+		}
+		return mcp.NewToolResultText(string(out)), nil
+	}
+	mcpServer.AddTool(readQueryTool, readQueryHandler)
+	toolHandlers["read-query"] = readQueryHandler
+
+	// 2) write-query: INSERT/UPDATE/DELETE
+	writeQueryTool := mcp.NewTool("write-query",
+		mcp.WithDescription("Execute INSERT/UPDATE/DELETE on a SQLite DB"),
+		mcp.WithString("db",
+			mcp.Required(),
+			mcp.Description("Path to the .db file"),
+		),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The non-SELECT SQL to run"),
+		),
+	)
+	writeQueryHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		db, _ := req.Params.Arguments["db"].(string)
+		q, _ := req.Params.Arguments["query"].(string)
+		cmd := exec.Command("sqlite3", db, q)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return mcp.NewToolResultText(
+				fmt.Sprintf("write-query failed: %v\n\n%s", err, string(out)),
+			), nil
+		}
+		return mcp.NewToolResultText("OK"), nil
+	}
+	mcpServer.AddTool(writeQueryTool, writeQueryHandler)
+	toolHandlers["write-query"] = writeQueryHandler
+
+	// 3) create-table: wraps write-query for a CREATE TABLE statement
+	createSQLTableTool := mcp.NewTool("create-SQLtable",
+		mcp.WithDescription("Create a new table in the SQLite DB"),
+		mcp.WithString("db",
+			mcp.Required(),
+			mcp.Description("Path to the .db file"),
+		),
+		mcp.WithString("definition",
+			mcp.Required(),
+			mcp.Description("SQL table definition, e.g. `CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);`"),
+		),
+	)
+	createSQLTableHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		db, _ := req.Params.Arguments["db"].(string)
+		def, _ := req.Params.Arguments["definition"].(string)
+		cmd := exec.Command("sqlite3", db, def)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return mcp.NewToolResultText(
+				fmt.Sprintf("create-table failed: %v\n\n%s", err, string(out)),
+			), nil
+		}
+		return mcp.NewToolResultText("Table created"), nil
+	}
+	mcpServer.AddTool(createSQLTableTool, createSQLTableHandler)
+	toolHandlers["create-table"] = createSQLTableHandler
+
+	// 4) list-tables: query sqlite_master
+	listTablesTool := mcp.NewTool("list-tables",
+		mcp.WithDescription("List all tables in the SQLite DB"),
+		mcp.WithString("db",
+			mcp.Required(),
+			mcp.Description("Path to the .db file"),
+		),
+	)
+	listTablesHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		db, _ := req.Params.Arguments["db"].(string)
+		sql := `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;`
+		cmd := exec.Command("sqlite3", "-csv", db, sql)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return mcp.NewToolResultText(
+				fmt.Sprintf("list-tables failed: %v\n\n%s", err, string(out)),
+			), nil
+		}
+		return mcp.NewToolResultText(string(out)), nil
+	}
+	mcpServer.AddTool(listTablesTool, listTablesHandler)
+	toolHandlers["list-tables"] = listTablesHandler
 	// Start HTTP JSON‑RPC endpoint on /rpc.
 	http.HandleFunc("/rpc", rpcHandler)
 	go func() {
