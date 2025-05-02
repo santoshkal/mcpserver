@@ -1,0 +1,13 @@
+
+{
+    "name": "MCPServer",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.config/nvim,target=/root/.config/nvim,type=bind"
+    ],
+    "settings": {},
+    "extensions": [],
+    "postCreateCommand": ""
+}

@@ -93,7 +93,7 @@ func (c *Client) Initialize() (*mcp.InitializeResult, error) {
 	var initRequest mcp.InitializeRequest
 	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "parakeet mcp client",
+		Name:    "genval mcp client",
 		Version: "1.0.0",
 	}
 	initResult, err := c.mcpClient.Initialize(c.ctx, initRequest)
