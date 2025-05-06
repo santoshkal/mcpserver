@@ -1,4 +1,4 @@
-# MCP Server with multiple Tools and a sigle client to interact with it
+# MCP Server with multiple Tools and support a single client to interact with all the Servers
 
 ## To build the Client and Server executables
 - Build the client:
@@ -6,30 +6,48 @@
 - Build the MCP Server:
 `go build -o ./mcpserver ./server`
 
-## Start the MCP Server:
-`./mcpserver`
+Similarly buld and start all the servers.
 
-This will start the MCP server on localhost port :1234
+## Start the MCP Server:
+`./mcpserver1`
+`./mcpserver2`
+
+This will start both the MCP servers one on localhost on their respective Ports
+
+## Create the config JSON file with all the server details.
+This config will be read by the client to decide which server the tool belongs and make TooCall
+
+```json
+{
+  "mcpServers": {
+    "server1": {
+      "url": "http://localhost:1234/sse"
+    },
+    "server2": {
+      "url": "http://localhost:1111/sse"
+    }
+  }
+}
+```
 
 ## Now run the client with following commands:
 
 ```sh
-./mcpclient -baseurl http://localhost:1234/sse -prompt "Pull a latest redis image"
+./mcpclient -config $HOME/mcpserver/config.json -prompt "Pull a latest nginx image"
 ```
 
 You should see the logs in the following format:
 ```sh
-./mcpclient -baseurl http://localhost:1234/sse -prompt "Pull a latest redis image"
-[DEBUG] Initialized: &{Result:{Meta:map[]} ProtocolVersion:2024-11-05 Capabilities:{Experimental:map[] Logging:0xa0f8e0 Prompts:0xc0000127ba Resources:0xc0000127bc Tools:0xc0000127be} ServerInfo:{Name:MCP Tool STDIO Server Version:v1.0.0} Instructions:}
-[DEBUG] LLM reply: {
-  "tool": "pull_image",
-  "arguments": {
-    "image": "redis:latest"
-  }
-}
-[DEBUG] Parsed tool call: {Tool:pull_image Arguments:map[image:redis:latest]}
+➜  mcpserver git:(multi-client) ✗ ./mcpclient -config /home/santosh/mcpserver/config.json -prompt "Pull a nginx latest image"
+[DEBUG] Initialized all servers
+[DEBUG] LLM reply: {"tool":"pull_image", "arguments":{"image":"nginx:latest"}}
+[DEBUG] Parsed tool call: {Tool:pull_image Arguments:map[image:nginx:latest]}
 Tool 'pull_image' result:
-"
+Tool 'pull_image' completed.
+  IsError: false
+  Content #1:
+  TextContent: {{<nil>} text Image 'nginx:latest' pulled successfully}
+    Unknown content type: mcp.TextContent{Annotated:mcp.Annotated{Annotations:(*mcp.Annotations)(nil)}, Type:"text", Text:"Image 'nginx:latest' pulled successfully"}
 ```
 
 Currently this implementation contains lots of debug logs which can be cleaned up of this code is

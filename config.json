@@ -1,0 +1,11 @@
+
+{
+  "mcpServers": {
+    "server1": {
+      "url": "http://localhost:1234/sse"
+    },
+    "server2": {
+      "url": "http://localhost:1111/sse"
+    }
+  }
+}

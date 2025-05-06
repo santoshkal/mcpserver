@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
+	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -40,187 +42,319 @@ type SSEClientError struct{ Stage, Err string }
 
 func (e *SSEClientError) Error() string { return fmt.Sprintf("%s: %s", e.Stage, e.Err) }
 
-// --- MCP client ----------------------------------------------------
-
-type Client struct {
-	mcpClient *mcpclient.SSEMCPClient
-	ctx       context.Context
+// Config holds the map of server names → URLs
+type Config struct {
+	MCPServers map[string]ServerConfig `json:"mcpServers"`
+}
+type ServerConfig struct {
+	URL string `json:"url"`
 }
 
-func NewClient(ctx context.Context, baseURL string) (*Client, error) {
-	c, err := mcpclient.NewSSEMCPClient(baseURL)
+// MultiClient can drive tools on multiple MCP servers
+type MultiClient struct {
+	clients       map[string]*mcpclient.Client // was *SSEMCPClient, now *Client :contentReference[oaicite:1]{index=1}
+	ctx           context.Context
+	toolToServer  map[string]string // tool name → server name
+	serverDetails map[string]*ServerDetails
+}
+
+type ServerDetails struct {
+	Tools []mcp.Tool
+	Info  *mcp.InitializeResult
+}
+
+func init() {
+	// Enable Trace level (everything) and show full timestamps
+	log.SetLevel(log.TraceLevel)
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp: true,
+	})
+}
+
+// LoadConfig reads your config.json
+func LoadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, &SSEClientError{"Client creation", err.Error()}
+		return nil, fmt.Errorf("error reading config: %v", err)
 	}
-	return &Client{mcpClient: c, ctx: ctx}, nil
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %v", err)
+	}
+	return &cfg, nil
 }
 
-func (c *Client) Start() error {
-	if err := c.mcpClient.Start(c.ctx); err != nil {
-		return &SSEClientError{"Client start", err.Error()}
+// NewMultiClient wires up one Client per server
+func NewMultiClient(ctx context.Context, cfg *Config) (*MultiClient, error) {
+	m := &MultiClient{
+		clients:       make(map[string]*mcpclient.Client),
+		ctx:           ctx,
+		toolToServer:  make(map[string]string),
+		serverDetails: make(map[string]*ServerDetails),
+	}
+
+	for name, sc := range cfg.MCPServers {
+		if !strings.HasSuffix(sc.URL, "/sse") {
+			sc.URL = strings.TrimRight(sc.URL, "/") + "/sse"
+		}
+		cli, err := mcpclient.NewSSEMCPClient(sc.URL)
+		if err != nil {
+			log.Trace("creating client error: %v", err)
+			return nil, &SSEClientError{"Client creation for " + name, err.Error()}
+		}
+
+		// **Register your SSE notification handler here**:
+		cli.OnNotification(func(n mcp.JSONRPCNotification) {
+			// n.Method is "tools/result", n.Params is the body you sent
+			// You can unmarshal n.Params into a struct if you like:
+			var payload struct {
+				Name   string                 `json:"name"`
+				Output map[string]interface{} `json:"output"` // or whatever shape
+			}
+			// raw params come in JSON format inside n.Params, so:
+			raw, _ := json.Marshal(n.Params)
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				log.Trace("[Notification][%s] failed to decode params: %v", name, err)
+				return
+			}
+			log.Infof("[Notification][%s] Tool '%s' result notification: %+v",
+				name, payload.Name, payload.Output)
+		})
+
+		m.clients[name] = cli
+		m.serverDetails[name] = &ServerDetails{}
+	}
+	return m, nil
+}
+
+// StartAll and InitializeAll
+func (m *MultiClient) StartAll() error {
+	for name, cli := range m.clients {
+		if err := cli.Start(m.ctx); err != nil {
+			return &SSEClientError{"Client start for " + name, err.Error()}
+		}
 	}
 	return nil
 }
 
-func (c *Client) Initialize() (*mcp.InitializeResult, error) {
-	req := mcp.InitializeRequest{}
-	req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	req.Params.ClientInfo = mcp.Implementation{
-		Name:    "dynamic-mcp-client",
-		Version: "1.0.0",
+func (m *MultiClient) InitializeAll() error {
+	for name, cli := range m.clients {
+		req := mcp.InitializeRequest{}
+		req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+		req.Params.ClientInfo = mcp.Implementation{
+			Name:    "multi-mcp-client",
+			Version: "1.0.0",
+		}
+		res, err := cli.Initialize(m.ctx, req)
+		if err != nil {
+			return &SSEClientError{"Initialization for " + name, err.Error()}
+		}
+		m.serverDetails[name].Info = res
 	}
-	res, err := c.mcpClient.Initialize(c.ctx, req)
-	if err != nil {
-		return nil, &SSEClientError{"Initialization", err.Error()}
-	}
-	return res, nil
+	return nil
 }
 
-func (c *Client) ListToolsRaw() ([]mcp.Tool, error) {
-	req := mcp.ListToolsRequest{}
-	res, err := c.mcpClient.ListTools(c.ctx, req)
-	if err != nil {
-		return nil, &SSEClientError{"ListTools RPC", err.Error()}
+// ListAllToolsRaw populates toolToServer
+func (m *MultiClient) ListAllToolsRaw() (map[string][]mcp.Tool, error) {
+	all := make(map[string][]mcp.Tool)
+	for name, cli := range m.clients {
+		res, err := cli.ListTools(m.ctx, mcp.ListToolsRequest{})
+		if err != nil {
+			return nil, &SSEClientError{"ListTools for " + name, err.Error()}
+		}
+		all[name] = res.Tools
+		m.serverDetails[name].Tools = res.Tools
+		for _, t := range res.Tools {
+			m.toolToServer[t.Name] = name
+		}
 	}
-	return res.Tools, nil
+	return all, nil
 }
 
-func (c *Client) ListToolsJSON() (string, error) {
-	tools, err := c.ListToolsRaw()
+func (m *MultiClient) ListToolsJSON() (string, error) {
+	all, err := m.ListAllToolsRaw()
 	if err != nil {
+		log.Printf("error listing tools: %v", err)
 		return "", err
 	}
-	b, err := json.MarshalIndent(tools, "", "  ")
+	b, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
-		return "", &SSEClientError{"Marshal Tools JSON", err.Error()}
+		return "", &SSEClientError{"Marshal tools", err.Error()}
 	}
 	return string(b), nil
 }
 
-// CallTool invokes the given tool name with arguments.
-func (c *Client) CallTool(name string, args map[string]any) (string, error) {
-	req := mcp.CallToolRequest{
-		Request: mcp.Request{Method: "tools/call"},
+// CallTool dispatches the right MCPClient.CallTool
+func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error) {
+	srv, ok := m.toolToServer[tool]
+	if !ok {
+		return "", &SSEClientError{"CallTool", "no server for tool " + tool}
 	}
-	req.Params.Name = name
+	cli := m.clients[srv]
+
+	// Build and send the CallToolRequest
+	req := mcp.CallToolRequest{}
+	req.Params.Name = tool
 	req.Params.Arguments = args
 
-	res, err := c.mcpClient.CallTool(c.ctx, req)
+	res, err := cli.CallTool(m.ctx, req)
 	if err != nil {
-		return "", &SSEClientError{"Tool call", err.Error()}
+		return "", &SSEClientError{"CallTool", err.Error()}
 	}
-	// extract text
-	if len(res.Content) > 0 {
-		if tc, ok := res.Content[0].(*mcp.TextContent); ok {
-			return tc.Text, nil
+
+	// Start assembling a detailed report
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", tool))
+	b.WriteString(fmt.Sprintf("  IsError: %v\n", res.IsError))
+
+	if len(res.Content) == 0 {
+		b.WriteString("  (no content returned)\n")
+		return b.String(), nil
+	}
+
+	// Iterate every Content entry
+	for i, c := range res.Content {
+		b.WriteString(fmt.Sprintf("  Content #%d:\n", i+1))
+		b.WriteString(fmt.Sprintf("  TextContent: %v\n", c))
+		switch v := c.(type) {
+		case *mcp.TextContent:
+			if v.Type == "Text" {
+				b.WriteString(fmt.Sprintf("    Text:\n%s\n", indent(v.Text, "      ")))
+			}
+		case *mcp.ImageContent:
+			b.WriteString("    Type: image\n")
+			b.WriteString(fmt.Sprintf("    MIMEType: %s\n", v.MIMEType))
+			b.WriteString(fmt.Sprintf("    Data length: %d bytes (base64)\n", len(v.Data)))
+		default:
+			b.WriteString(fmt.Sprintf("    Unknown content type: %#v\n", v))
 		}
 	}
-	return "", nil
+
+	return b.String(), nil
 }
 
-// --- LLM helper ------------------------------------------------------------
+// indent prefixes each line in s with prefix (for nicer multiline formatting)
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
+}
 
-// ToolCall is what we expect the model to return.
+func (m *MultiClient) Close() {
+	for _, cli := range m.clients {
+		cli.Close()
+	}
+}
+
+// ToolCall is the LLM→JSON schema
 type ToolCall struct {
 	Tool      string         `json:"tool"`
 	Arguments map[string]any `json:"arguments"`
 }
 
 func main() {
-	// CLI flags
-	baseURL := flag.String("baseurl", "http://localhost:1234/sse", "MCP SSE endpoint")
-	prompt := flag.String("prompt", "", "Natural language prompt for the assistant")
+	var (
+		cfgPath = flag.String("config", "", "Path to config.json")
+		baseURL = flag.String("baseurl", "http://localhost:1234/sse", "Single SSE URL")
+		prompt  = flag.String("prompt", "", "What to ask")
+	)
 	flag.Parse()
-
 	if *prompt == "" {
-		log.Fatal("Please provide -prompt")
+		log.Fatal("Please supply -prompt")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// MCP client
-	cli, err := NewClient(ctx, *baseURL)
+	// choose multi vs single
+	var cli *MultiClient
+	var err error
+	if *cfgPath != "" {
+		cfg, e := LoadConfig(*cfgPath)
+		if e != nil {
+			log.Fatalf("LoadConfig: %v", e)
+		}
+		cli, err = NewMultiClient(ctx, cfg)
+	} else {
+		// wrap a single‐URL config
+		cfg := &Config{
+			MCPServers: map[string]ServerConfig{
+				"default": {URL: *baseURL},
+			},
+		}
+		cli, err = NewMultiClient(ctx, cfg)
+	}
 	if err != nil {
-		log.Fatalf("Error: %v", err)
+		log.Fatalf("Client init: %v", err)
 	}
-	defer cli.mcpClient.Close()
+	defer cli.Close()
 
-	if err := cli.Start(); err != nil {
-		log.Fatalf("Error: %v", err)
+	if err := cli.StartAll(); err != nil {
+		log.Fatalf("StartAll: %v", err)
 	}
-
-	initRes, err := cli.Initialize()
-	if err != nil {
-		log.Fatalf("Error: %v", err)
+	if err := cli.InitializeAll(); err != nil {
+		log.Fatalf("InitializeAll: %v", err)
 	}
-	fmt.Printf("[DEBUG] Initialized: %+v\n", initRes)
+	fmt.Println("[DEBUG] Initialized all servers")
 
-	// Fetch tool JSON
 	toolsJSON, err := cli.ListToolsJSON()
 	if err != nil {
-		log.Fatalf("Error fetching tools: %v", err)
+		log.Fatalf("ListTools: %v", err)
 	}
-	// fmt.Printf("[DEBUG] Available tools JSON:\n%s\n", toolsJSON)
 
-	// Build system prompt
+	// build system prompt...
 	systemPrompt := fmt.Sprintf(`
 You are an assistant that invokes tools via MCP.
-Here are the available tools (with their JSON schema):
+Here are the available tools:
 %s
-
-When you decide which tool to call in response to the user, reply *only* with a JSON object:
-{
-  "tool": "<tool name>",
-  "arguments": { ... }
-}
-If you do not need to call any tool, return:
-{"tool":"none","arguments":{}}
+Respond *only* with JSON:
+{"tool":"", "arguments":{}}
 `, toolsJSON)
 
-	// Debug
-	// fmt.Printf("[DEBUG] System prompt:\n%s\n", systemPrompt)
-
-	// Initialize LLM
+	// init LLM
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		log.Fatal("Please set OPENAI_API_KEY")
+		log.Fatal("set OPENAI_API_KEY")
 	}
 	llm, err := openai.New(openai.WithModel("gpt-4"), openai.WithToken(apiKey))
 	if err != nil {
-		log.Fatalf("OpenAI init error: %v", err)
+		log.Fatalf("OpenAI init: %v", err)
 	}
 
-	// Build history
 	history := []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
 		llms.TextParts(llms.ChatMessageTypeHuman, *prompt),
 	}
-
-	// Generate without function definitions
 	resp, err := llm.GenerateContent(ctx, history)
 	if err != nil {
 		log.Fatalf("LLM error: %v", err)
 	}
+
 	reply := resp.Choices[0].Content
 	fmt.Printf("[DEBUG] LLM reply: %s\n", reply)
 
-	// Parse the tool call
+	// strip markdown fencing if any
+	clean := reply
+	if parts := strings.Split(reply, "```"); len(parts) > 1 {
+		clean = strings.TrimSpace(parts[1])
+	}
+
 	var tc ToolCall
-	if err := json.Unmarshal([]byte(reply), &tc); err != nil {
-		log.Fatalf("Failed to parse JSON from model: %v", err)
+	if err := json.Unmarshal([]byte(clean), &tc); err != nil {
+		log.Fatalf("Parse JSON: %v", err)
 	}
 	fmt.Printf("[DEBUG] Parsed tool call: %+v\n", tc)
 
 	if tc.Tool == "none" {
-		fmt.Println("No tool to call.")
+		fmt.Println("No tool needed.")
 		return
 	}
 
-	// MCP Client invokes the chosen tool
 	result, err := cli.CallTool(tc.Tool, tc.Arguments)
 	if err != nil {
-		log.Fatalf("Tool invocation error: %v", err)
+		log.Fatalf("Tool call: %v", err)
 	}
 	fmt.Printf("Tool '%s' result:\n%s\n", tc.Tool, result)
 }
