@@ -427,17 +427,13 @@ func main() {
 	http.HandleFunc("/rpc", rpcHandler)
 	go func() {
 		fmt.Println("HTTP JSON‑RPC server started on port 1234")
-		if err := http.ListenAndServe(":1234", nil); err != nil {
-			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
-			os.Exit(1)
+		// if err := http.ListenAndServe(":1234", nil); err != nil {
+		sseServer := server.NewSSEServer(mcpServer)
+		if err := sseServer.Start(":1234"); err != nil {
+			fmt.Fprintf(os.Stderr, "SSE server error: %v\n", err)
 		}
+		os.Exit(1)
 	}()
-
-	// Optionally, start the SSE server on another port (1235).
-	sseServer := server.NewSSEServer(mcpServer)
-	if err := sseServer.Start(":1235"); err != nil {
-		fmt.Fprintf(os.Stderr, "SSE server error: %v\n", err)
-	}
 
 	// Block forever.
 	select {}
