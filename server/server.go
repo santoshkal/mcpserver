@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	log "github.com/sirupsen/logrus"
@@ -36,10 +38,86 @@ type jsonRPCResponse struct {
 	ID      interface{} `json:"id"`
 }
 
+type sseSession struct {
+	writer              http.ResponseWriter
+	flusher             http.Flusher
+	done                chan struct{}
+	eventQueue          chan string
+	sessionID           string
+	notificationChannel chan mcp.JSONRPCNotification
+	initialized         bool
+}
+
 var (
 	mcpServer    *server.MCPServer
 	toolHandlers = map[string]ToolHandler{}
+	sessions     sync.Map
 )
+
+// Implement the ClientSession interface
+func (s *sseSession) SessionID() string {
+	return s.sessionID
+}
+
+func (s *sseSession) NotificationChannel() chan<- mcp.JSONRPCNotification {
+	return s.notificationChannel
+}
+
+func (s *sseSession) Initialize() {
+	s.initialized = true
+}
+
+func (s sseSession) Initialized() bool {
+	return s.initialized
+}
+
+func handleSSE(mcpServer *server.MCPServer, w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	sessionID := uuid.New().String()
+	session := &sseSession{
+		writer:              w,
+		flusher:             flusher,
+		done:                make(chan struct{}),
+		eventQueue:          make(chan string, 100),
+		sessionID:           sessionID,
+		notificationChannel: make(chan mcp.JSONRPCNotification, 100),
+	}
+	sessions.Store(sessionID, session)
+	defer sessions.Delete(sessionID)
+	defer func() { close(session.done) }()
+
+	// Register session with MCP server (if supported)
+	ctx := mcpServer.WithContext(r.Context(), session)
+	if err := mcpServer.RegisterSession(ctx, session); err != nil {
+		http.Error(w, "Session registration failed", http.StatusInternalServerError)
+		return
+	}
+	defer mcpServer.UnregisterSession(ctx, sessionID)
+
+	// Send session ID to client
+	fmt.Fprintf(w, "event: endpoint\ndata: %s\r\n\r\n", sessionID)
+	flusher.Flush()
+
+	// Main event loop
+	for {
+		select {
+		case event := <-session.eventQueue:
+			fmt.Fprint(w, event)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
 
 func main() {
 	log.SetLevel(log.TraceLevel)
@@ -455,11 +533,11 @@ func main() {
 	// make sure debug‐level logs actually get printed
 
 	// Build your SSEServer, pointing JSON-RPC to “/rpc”:
-	sse := server.NewSSEServer(mcpServer, server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"))
-
 	mux := http.NewServeMux()
-	mux.Handle("/sse", sse.SSEHandler())
-	mux.Handle("/rpc", sse.MessageHandler())
+	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		handleSSE(mcpServer, w, r)
+	})
+	// mux.Handle("/rpc", http.HandlerFunc(handleRPC)) // You'll need to implement handleRPC
 
 	addr := ":1234"
 	log.Printf("▶️  Starting MCP HTTP/SSE server 1 on %s …", addr)
@@ -467,78 +545,6 @@ func main() {
 		log.Fatalf("❌  Failed to start server1: %v", err)
 	}
 }
-
-// func rpcHandler(w http.ResponseWriter, r *http.Request) {
-// 	// JSON-RPC envelopes
-// 	var req struct {
-// 		JSONRPC string          `json:"jsonrpc"`
-// 		Method  string          `json:"method"`
-// 		Params  json.RawMessage `json:"params"`
-// 		ID      interface{}     `json:"id"`
-// 	}
-// 	var resp struct {
-// 		JSONRPC string      `json:"jsonrpc"`
-// 		Result  interface{} `json:"result,omitempty"`
-// 		Error   interface{} `json:"error,omitempty"`
-// 		ID      interface{} `json:"id"`
-// 	}
-// 	resp.JSONRPC = "2.0"
-//
-// 	// read & unmarshal request
-// 	body, err := io.ReadAll(r.Body)
-// 	if err != nil {
-// 		http.Error(w, "Failed to read body", http.StatusBadRequest)
-// 		return
-// 	}
-// 	if err := json.Unmarshal(body, &req); err != nil {
-// 		http.Error(w, "Invalid JSON-RPC", http.StatusBadRequest)
-// 		return
-// 	}
-// 	resp.ID = req.ID
-//
-// 	// only support tools/call
-// 	if req.Method != "tools/call" {
-// 		http.Error(w, "Unknown method "+req.Method, http.StatusNotFound)
-// 		return
-// 	}
-//
-// 	// extract tool name + args
-// 	var callParams struct {
-// 		Name      string                 `json:"name"`
-// 		Arguments map[string]interface{} `json:"arguments"`
-// 	}
-// 	if err := json.Unmarshal(req.Params, &callParams); err != nil {
-// 		http.Error(w, "Bad call payload", http.StatusBadRequest)
-// 		return
-// 	}
-//
-// 	// lookup handler
-// 	handler, ok := toolHandlers[callParams.Name]
-// 	if !ok {
-// 		http.Error(w, "Unknown tool "+callParams.Name, http.StatusNotFound)
-// 		return
-// 	}
-//
-// 	// build CallToolRequest by filling its anonymous Params struct
-// 	var callReq mcp.CallToolRequest
-// 	callReq.Request.Method = req.Method
-// 	callReq.Params.Name = callParams.Name
-// 	callReq.Params.Arguments = callParams.Arguments
-//
-// 	// invoke
-// 	result, err := handler(r.Context(), callReq)
-// 	if err != nil {
-// 		resp.Error = err.Error()
-// 	} else {
-// 		resp.Result = result
-// 	}
-//
-// 	// send response
-// 	w.Header().Set("Content-Type", "application/json")
-// 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-// 		log.Printf("Failed to write resp: %v", err)
-// 	}
-// }
 
 func handleNotification(ctx context.Context, notification mcp.JSONRPCNotification) {
 	fmt.Printf("Received notification from client: %s\n", notification.Method)

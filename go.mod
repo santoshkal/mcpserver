@@ -4,7 +4,8 @@ go 1.23.7
 
 require (
 	github.com/docker/docker v28.1.1+incompatible
-	github.com/mark3labs/mcp-go v0.26.0
+	github.com/google/uuid v1.6.0
+	github.com/mark3labs/mcp-go v0.27.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tmc/langchaingo v0.1.13
 )
@@ -19,7 +20,6 @@ require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
