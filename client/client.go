@@ -114,7 +114,7 @@ func NewMultiClient(ctx context.Context, cfg *Config) (*MultiClient, error) {
 			// raw params come in JSON format inside n.Params, so:
 			raw, _ := json.Marshal(n.Params)
 			if err := json.Unmarshal(raw, &payload); err != nil {
-				log.Trace("[Notification][%s] failed to decode params: %v", name, err)
+				log.Printf("[Notification][%s] failed to decode params: %v", name, err)
 				return
 			}
 			log.Infof("[Notification][%s] Tool '%s' result notification: %+v",
@@ -129,15 +129,24 @@ func NewMultiClient(ctx context.Context, cfg *Config) (*MultiClient, error) {
 
 // StartAll and InitializeAll
 func (m *MultiClient) StartAll() error {
+	var upServers []string
 	for name, cli := range m.clients {
 		if err := cli.Start(m.ctx); err != nil {
-			return &SSEClientError{"Client start for " + name, err.Error()}
+			log.Warnf("Server %q failed to start: %v; marking as down", name, err)
+			delete(m.clients, name)
+			continue
 		}
+		upServers = append(upServers, name)
 	}
+	if len(upServers) == 0 {
+		return fmt.Errorf("no servers running")
+	}
+	log.Infof("Server '%v' started succussfully", upServers)
 	return nil
 }
 
 func (m *MultiClient) InitializeAll() error {
+	var inited []string
 	for name, cli := range m.clients {
 		req := mcp.InitializeRequest{}
 		req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
@@ -147,10 +156,17 @@ func (m *MultiClient) InitializeAll() error {
 		}
 		res, err := cli.Initialize(m.ctx, req)
 		if err != nil {
-			return &SSEClientError{"Initialization for " + name, err.Error()}
+			log.Warnf("Initialization failed for %q: %v; dropping", name, err)
+			delete(m.clients, name)
+			continue
 		}
 		m.serverDetails[name].Info = res
+		inited = append(inited, name)
 	}
+	if len(inited) == 0 {
+		return &SSEClientStartError{fmt.Sprintf("No servers found, Initialization failed: %v", len(inited))}
+	}
+	log.Infof("Initialized Server: %v", inited)
 	return nil
 }
 
