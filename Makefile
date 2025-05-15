@@ -5,7 +5,7 @@ all: client server
 
 client:
 	@echo "Building client..."
-	@go build -o mcpClient ./client
+	@go build -o mcpclient ./client
 	@echo "Client build complete."
 
 server:

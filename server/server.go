@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,10 +38,6 @@ type jsonRPCResponse struct {
 }
 
 type sseSession struct {
-	writer              http.ResponseWriter
-	flusher             http.Flusher
-	done                chan struct{}
-	eventQueue          chan string
 	sessionID           string
 	notificationChannel chan mcp.JSONRPCNotification
 	initialized         bool
@@ -51,7 +46,6 @@ type sseSession struct {
 var (
 	mcpServer    *server.MCPServer
 	toolHandlers = map[string]ToolHandler{}
-	sessions     sync.Map
 )
 
 // Implement the ClientSession interface
@@ -71,58 +65,8 @@ func (s sseSession) Initialized() bool {
 	return s.initialized
 }
 
-func handleSSE(mcpServer *server.MCPServer, w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	sessionID := uuid.New().String()
-	session := &sseSession{
-		writer:              w,
-		flusher:             flusher,
-		done:                make(chan struct{}),
-		eventQueue:          make(chan string, 100),
-		sessionID:           sessionID,
-		notificationChannel: make(chan mcp.JSONRPCNotification, 100),
-	}
-	sessions.Store(sessionID, session)
-	defer sessions.Delete(sessionID)
-	defer func() { close(session.done) }()
-
-	// Register session with MCP server (if supported)
-	ctx := mcpServer.WithContext(r.Context(), session)
-	if err := mcpServer.RegisterSession(ctx, session); err != nil {
-		http.Error(w, "Session registration failed", http.StatusInternalServerError)
-		return
-	}
-	defer mcpServer.UnregisterSession(ctx, sessionID)
-
-	// Send session ID to client
-	fmt.Fprintf(w, "event: endpoint\ndata: %s\r\n\r\n", sessionID)
-	flusher.Flush()
-
-	// Main event loop
-	for {
-		select {
-		case event := <-session.eventQueue:
-			fmt.Fprint(w, event)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
 func main() {
 	log.SetLevel(log.TraceLevel)
-
-	// 1) build up a Hooks struct...
 	hooks := &server.Hooks{}
 
 	hooks.AddAfterCallTool(func(
@@ -147,6 +91,7 @@ func main() {
 	hooks.AddBeforeCallTool(func(ctx context.Context, id any, req *mcp.CallToolRequest) {
 		log.Infof("🔧 Calling tool: %s  args=%v", req.Params.Name, req.Params.Arguments)
 	})
+
 	// Create and configure the MCP server.
 	mcpServer = server.NewMCPServer(
 		"MCP Tool STDIO Server",
@@ -158,6 +103,26 @@ func main() {
 	)
 	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
 
+	sessionID := uuid.New().String()
+	session := &sseSession{
+		sessionID:           sessionID,
+		notificationChannel: make(chan mcp.JSONRPCNotification, 10),
+	}
+	ctx := mcpServer.WithContext(context.Background(), session)
+
+	if err := mcpServer.RegisterSession(ctx, session); err != nil {
+		log.Printf("Failed to register session : %v", err)
+	}
+
+	fmt.Printf("Session ID: %v\n", session.SessionID())
+	defer mcpServer.UnregisterSession(ctx, session.SessionID())
+
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, res *mcp.InitializeResult) {
+		err := mcpServer.SendNotificationToSpecificClient(session.SessionID(), "notification/update", map[string]any{"Message:": "New notification"})
+		if err != nil {
+			log.Printf("Failed to send notifications: %v", err)
+		}
+	})
 	// --- Register the MarkitDown tool ---
 
 	markItDownTool := mcp.NewTool("to-markdown",
@@ -529,15 +494,13 @@ func main() {
 	mcpServer.AddTool(listTablesTool, listTablesHandler)
 	toolHandlers["list-tables"] = listTablesHandler
 
-	// Start HTTP server with both RPC and SSE endpoints
-	// make sure debug‐level logs actually get printed
+	// Setup the Server
 
-	// Build your SSEServer, pointing JSON-RPC to “/rpc”:
+	sse := server.NewSSEServer(mcpServer, server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"))
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
-		handleSSE(mcpServer, w, r)
-	})
-	// mux.Handle("/rpc", http.HandlerFunc(handleRPC)) // You'll need to implement handleRPC
+	mux.Handle("/sse", sse.SSEHandler())
+	mux.Handle("/rpc", sse.MessageHandler())
 
 	addr := ":1234"
 	log.Printf("▶️  Starting MCP HTTP/SSE server 1 on %s …", addr)
