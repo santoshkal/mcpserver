@@ -5,7 +5,7 @@ go 1.23.7
 require (
 	github.com/docker/docker v28.1.1+incompatible
 	github.com/google/uuid v1.6.0
-	github.com/mark3labs/mcp-go v0.27.0
+	github.com/mark3labs/mcp-go v0.28.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tmc/langchaingo v0.1.13
 )

@@ -47,14 +47,18 @@ type Config struct {
 	MCPServers map[string]ServerConfig `json:"mcpServers"`
 }
 type ServerConfig struct {
-	URL string `json:"url"`
+	URL     string   `json:"url,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Env     []string `json:"env,omitempty"`
+	Args    []string `json:"args,omitempty"`
 }
 
 // MultiClient can drive tools on multiple MCP servers
 type MultiClient struct {
-	clients       map[string]*mcpclient.Client // was *SSEMCPClient, now *Client :contentReference[oaicite:1]{index=1}
-	ctx           context.Context
-	toolToServer  map[string]string // tool name → server name
+	clients map[string]*mcpclient.Client
+	ctx     context.Context
+	// tool name → server name
+	toolToServer  map[string]string
 	serverDetails map[string]*ServerDetails
 }
 
@@ -94,24 +98,40 @@ func NewMultiClient(ctx context.Context, cfg *Config) (*MultiClient, error) {
 	}
 
 	for name, sc := range cfg.MCPServers {
-		if !strings.HasSuffix(sc.URL, "/sse") {
-			sc.URL = strings.TrimRight(sc.URL, "/") + "/sse"
-		}
-		cli, err := mcpclient.NewSSEMCPClient(sc.URL)
-		if err != nil {
-			log.Trace("creating client error: %v", err)
-			return nil, &SSEClientError{"Client creation for " + name, err.Error()}
+		var (
+			url string
+			cli *mcpclient.Client
+			err error
+		)
+
+		switch {
+		case sc.URL != "":
+			url = sc.URL
+			if !strings.HasSuffix(url, "/sse") {
+				sc.URL = strings.TrimRight(url, "/") + "/sse"
+			}
+			cli, err = mcpclient.NewSSEMCPClient(sc.URL)
+			if err != nil {
+				log.Errorf("creating client error: %v", err)
+				return nil, &SSEClientError{"SSE Client creation failed for " + name, err.Error()}
+			}
+		case sc.Command != "":
+			m.serverDetails[name] = &ServerDetails{}
+			cli, err = mcpclient.NewStdioMCPClient(sc.Command, sc.Env, sc.Args...)
+			if err != nil {
+				return nil, &SSEClientError{"STDIO Client creation failed for " + name, err.Error()}
+			}
+		default:
+			return nil, fmt.Errorf("server '%q' must have either url or command+args", name)
 		}
 
-		// **Register your SSE notification handler here**:
+		// **Register notification handler here**:
 		cli.OnNotification(func(n mcp.JSONRPCNotification) {
-			// n.Method is "tools/result", n.Params is the body you sent
-			// You can unmarshal n.Params into a struct if you like:
 			var payload struct {
-				Name   string                 `json:"name"`
-				Output map[string]interface{} `json:"output"` // or whatever shape
+				Name   string         `json:"name"`
+				Output map[string]any `json:"output"`
 			}
-			// raw params come in JSON format inside n.Params, so:
+			// raw params come in JSON format inside n.Params
 			raw, _ := json.Marshal(n.Params)
 			if err := json.Unmarshal(raw, &payload); err != nil {
 				log.Printf("[Notification][%s] failed to decode params: %v", name, err)
@@ -209,7 +229,11 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 	cli := m.clients[srv]
 
 	// Build and send the CallToolRequest
-	req := mcp.CallToolRequest{}
+	req := mcp.CallToolRequest{
+		Request: mcp.Request{
+			Method: "tools/call",
+		},
+	}
 	req.Params.Name = tool
 	req.Params.Arguments = args
 
@@ -229,6 +253,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 	}
 
 	// Iterate every Content entry
+	// NOTE: extract the string output from the res
 	for i, c := range res.Content {
 		b.WriteString(fmt.Sprintf("  Content #%d:\n", i+1))
 		b.WriteString(fmt.Sprintf("  TextContent: %v\n", c))

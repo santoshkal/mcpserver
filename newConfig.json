@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "server2": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git"
+      ]
+    }
+  }
+}

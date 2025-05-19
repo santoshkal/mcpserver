@@ -77,8 +77,7 @@ func main() {
 	) {
 		log.Infof("✅ Tool '%v' completed: %v",
 			req.Params.Name,
-			// if you want the raw struct: fmt.Sprintf("%#v", res)
-			res, // text payload of the result
+			res,
 		)
 	})
 
@@ -103,26 +102,29 @@ func main() {
 	)
 	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
 
-	sessionID := uuid.New().String()
-	session := &sseSession{
-		sessionID:           sessionID,
-		notificationChannel: make(chan mcp.JSONRPCNotification, 10),
-	}
-	ctx := mcpServer.WithContext(context.Background(), session)
-
-	if err := mcpServer.RegisterSession(ctx, session); err != nil {
-		log.Printf("Failed to register session : %v", err)
-	}
-
-	fmt.Printf("Session ID: %v\n", session.SessionID())
-	defer mcpServer.UnregisterSession(ctx, session.SessionID())
-
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, res *mcp.InitializeResult) {
+		//We need to send UserAgent details as well
+		sessionID := uuid.New().String()
+		session := &sseSession{
+			sessionID:           sessionID,
+			notificationChannel: make(chan mcp.JSONRPCNotification, 10),
+		}
+		ctx = mcpServer.WithContext(context.Background(), session)
+
+		if err := mcpServer.RegisterSession(ctx, session); err != nil {
+			log.Printf("Failed to register session : %v", err)
+		}
 		err := mcpServer.SendNotificationToSpecificClient(session.SessionID(), "notification/update", map[string]any{"Message:": "New notification"})
+		defer mcpServer.UnregisterSession(ctx, session.SessionID())
+
 		if err != nil {
 			log.Printf("Failed to send notifications: %v", err)
 		}
 	})
+
+
+	// Tool registrations
+
 	// --- Register the MarkitDown tool ---
 
 	markItDownTool := mcp.NewTool("to-markdown",
@@ -276,80 +278,80 @@ func main() {
 	mcpServer.AddTool(mirrordTool, mirrordHandler)
 	toolHandlers["mirrord-exec"] = mirrordHandler
 
-	// --- Register the pull_image tool ---
-	// PullImageTool := mcp.NewTool("pull_image",
-	// 	mcp.WithDescription("Pull an image from Docker Hub"),
-	// 	mcp.WithString("image",
-	// 		mcp.Description("Name of the Docker image to pull (e.g., 'nginx:latest')"),
-	// 	),
-	// )
-	// PullImageHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// 	// Validate the "image" argument.
-	// 	image, ok := req.Params.Arguments["image"].(string)
-	// 	if !ok || image == "" {
-	// 		return mcp.NewToolResultText("invalid or missing image parameter"), nil
-	// 	}
-	// 	fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'pull_image' with image: %s\n", image)
-	//
-	// 	// Use the Docker client to pull the image.
-	// 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("failed to create Docker client: %v", err)
-	// 	}
-	// 	out, err := cli.ImagePull(ctx, image, img.PullOptions{})
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("failed to pull image: %v", err)
-	// 	}
-	// 	defer out.Close()
-	// 	// Log the Docker pull progress.
-	// 	_, err = io.Copy(os.Stderr, out)
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("error reading Docker pull response: %v", err)
-	// 	}
-	// 	return mcp.NewToolResultText(fmt.Sprintf("Image '%s' pulled successfully", image)), nil
-	// }
-	// mcpServer.AddTool(PullImageTool, PullImageHandler)
-	// toolHandlers["pull_image"] = PullImageHandler
-	//
-	// // --- Register the get_pods tool ---
-	// getPodsTool := mcp.NewTool("get_pods",
-	// 	mcp.WithDescription("Get Kubernetes Pods from the cluster"),
-	// )
-	// getPodsHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// 	fmt.Fprintln(os.Stderr, "[DEBUG] Invoking tool 'get_pods'")
-	// 	cmd := exec.Command("kubectl", "get", "pods")
-	// 	output, err := cmd.CombinedOutput()
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("failed to get pods: %v, output: %s", err, string(output))
-	// 	}
-	// 	return mcp.NewToolResultText(string(output)), nil
-	// }
-	// mcpServer.AddTool(getPodsTool, getPodsHandler)
-	// toolHandlers["get_pods"] = getPodsHandler
-	//
-	// // --- Register the git_init tool ---
-	// gitInitTool := mcp.NewTool("git_init",
-	// 	mcp.WithDescription("Initialize a Git repository in the provided project directory"),
-	// 	mcp.WithString("directory",
-	// 		mcp.Description("Path to the project directory"),
-	// 	),
-	// )
-	// gitInitHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// 	directory, ok := req.Params.Arguments["directory"].(string)
-	// 	if !ok || directory == "" {
-	// 		return nil, fmt.Errorf("invalid or missing directory parameter")
-	// 	}
-	// 	fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'git_init' with directory: %s\n", directory)
-	// 	cmd := exec.Command("git", "init", directory)
-	// 	output, err := cmd.CombinedOutput()
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("failed to initialize git repository: %v, output: %s", err, string(output))
-	// 	}
-	// 	return mcp.NewToolResultText(string(output)), nil
-	// }
-	// mcpServer.AddTool(gitInitTool, gitInitHandler)
-	// toolHandlers["git_init"] = gitInitHandler
-	//
+	--- Register the pull_image tool ---
+	PullImageTool := mcp.NewTool("pull_image",
+		mcp.WithDescription("Pull an image from Docker Hub"),
+		mcp.WithString("image",
+			mcp.Description("Name of the Docker image to pull (e.g., 'nginx:latest')"),
+		),
+	)
+	PullImageHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Validate the "image" argument.
+		image, ok := req.Params.Arguments["image"].(string)
+		if !ok || image == "" {
+			return mcp.NewToolResultText("invalid or missing image parameter"), nil
+		}
+		fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'pull_image' with image: %s\n", image)
+
+		// Use the Docker client to pull the image.
+		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Docker client: %v", err)
+		}
+		out, err := cli.ImagePull(ctx, image, img.PullOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to pull image: %v", err)
+		}
+		defer out.Close()
+		// Log the Docker pull progress.
+		_, err = io.Copy(os.Stderr, out)
+		if err != nil {
+			return nil, fmt.Errorf("error reading Docker pull response: %v", err)
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Image '%s' pulled successfully", image)), nil
+	}
+	mcpServer.AddTool(PullImageTool, PullImageHandler)
+	toolHandlers["pull_image"] = PullImageHandler
+
+	// --- Register the get_pods tool ---
+	getPodsTool := mcp.NewTool("get_pods",
+		mcp.WithDescription("Get Kubernetes Pods from the cluster"),
+	)
+	getPodsHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		fmt.Fprintln(os.Stderr, "[DEBUG] Invoking tool 'get_pods'")
+		cmd := exec.Command("kubectl", "get", "pods")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get pods: %v, output: %s", err, string(output))
+		}
+		return mcp.NewToolResultText(string(output)), nil
+	}
+	mcpServer.AddTool(getPodsTool, getPodsHandler)
+	toolHandlers["get_pods"] = getPodsHandler
+
+	// --- Register the git_init tool ---
+	gitInitTool := mcp.NewTool("git_init",
+		mcp.WithDescription("Initialize a Git repository in the provided project directory"),
+		mcp.WithString("directory",
+			mcp.Description("Path to the project directory"),
+		),
+	)
+	gitInitHandler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		directory, ok := req.Params.Arguments["directory"].(string)
+		if !ok || directory == "" {
+			return nil, fmt.Errorf("invalid or missing directory parameter")
+		}
+		fmt.Fprintf(os.Stderr, "[DEBUG] Invoking tool 'git_init' with directory: %s\n", directory)
+		cmd := exec.Command("git", "init", directory)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize git repository: %v, output: %s", err, string(output))
+		}
+		return mcp.NewToolResultText(string(output)), nil
+	}
+	mcpServer.AddTool(gitInitTool, gitInitHandler)
+	toolHandlers["git_init"] = gitInitHandler
+
 	// --- Register the create_table in Postgres tool ---
 	createTableTool := mcp.NewTool("create_table",
 		mcp.WithDescription("Create a database table in a local Postgres DB instance"),
@@ -496,15 +498,19 @@ func main() {
 
 	// Setup the Server
 
-	sse := server.NewSSEServer(mcpServer, server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"))
-
-	mux := http.NewServeMux()
-	mux.Handle("/sse", sse.SSEHandler())
-	mux.Handle("/rpc", sse.MessageHandler())
-
 	addr := ":1234"
-	log.Printf("▶️  Starting MCP HTTP/SSE server 1 on %s …", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// sse := server.NewSSEServer(mcpServer, server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"))
+	sseServer := server.NewSSEServer(mcpServer, server.WithBaseURL("http://localhost:1234"), server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"), server.WithHTTPServer(&http.Server{
+		Addr: addr,
+	}),
+	)
+
+	// mux := http.NewServeMux()
+	// mux.Handle("/sse", sse.SSEHandler())
+	// mux.Handle("/rpc", sse.MessageHandler())
+	//
+	log.Printf("▶️  Starting MCP HTTP/SSE server 1 on %s ...", addr)
+	if err := http.ListenAndServe(addr, sseServer); err != nil {
 		log.Fatalf("❌  Failed to start server1: %v", err)
 	}
 }
