@@ -23,8 +23,13 @@ This config will be read by the client to decide which server the tool belongs a
     "server1": {
       "url": "http://localhost:1234/sse"
     },
-    "server2": {
-      "url": "http://localhost:1111/sse"
+    "mcpServers": {
+      "server2": {
+        "command": "uvx",
+        "args": [
+          "mcp-server-git"
+        ]
+      }
     }
   }
 }
