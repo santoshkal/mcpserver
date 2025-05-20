@@ -1,9 +1,14 @@
 {
   "mcpServers": {
-    "server2": {
-      "command": "uvx",
+    "GolangServer": {
+      "command": "docker",
       "args": [
-        "mcp-server-git"
+        "run",
+        "-i",
+        "--rm",
+        "--mount",
+        "type=bind,src=/tmp/my-test-repo,dst=/tmp/my-test-repo",
+        "santoshkal/mcpserver:test"
       ]
     }
   }

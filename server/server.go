@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 
+	img "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -103,7 +106,7 @@ func main() {
 	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
 
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, res *mcp.InitializeResult) {
-		//We need to send UserAgent details as well
+		// We need to send UserAgent details as well
 		sessionID := uuid.New().String()
 		session := &sseSession{
 			sessionID:           sessionID,
@@ -121,7 +124,6 @@ func main() {
 			log.Printf("Failed to send notifications: %v", err)
 		}
 	})
-
 
 	// Tool registrations
 
@@ -278,7 +280,7 @@ func main() {
 	mcpServer.AddTool(mirrordTool, mirrordHandler)
 	toolHandlers["mirrord-exec"] = mirrordHandler
 
-	--- Register the pull_image tool ---
+	// --- Register the pull_image tool ---
 	PullImageTool := mcp.NewTool("pull_image",
 		mcp.WithDescription("Pull an image from Docker Hub"),
 		mcp.WithString("image",
