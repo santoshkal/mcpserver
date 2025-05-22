@@ -190,7 +190,6 @@ func (m *MultiClient) ListAllToolsRaw() (map[string][]mcp.Tool, error) {
 func (m *MultiClient) ListToolsJSON() (string, error) {
 	all, err := m.ListAllToolsRaw()
 	if err != nil {
-		log.Printf("error listing tools: %v", err)
 		return "", err
 	}
 	b, err := json.MarshalIndent(all, "", "  ")
@@ -202,15 +201,16 @@ func (m *MultiClient) ListToolsJSON() (string, error) {
 
 // CallTool dispatches the right MCPClient.CallTool
 func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error) {
-	srv, ok := m.toolToServer[tool]
+	ts := strings.Split(tool, ".")
+	srv, ok := m.toolToServer[ts[1]]
 	if !ok {
-		return "", &SSEClientError{"CallTool", "no server for tool " + tool}
+		return "", &SSEClientError{"CallTool", "no server for tool " + ts[1]}
 	}
-	cli := m.clients[srv]
 
+	cli := m.clients[srv]
 	// Build and send the CallToolRequest
 	req := mcp.CallToolRequest{}
-	req.Params.Name = tool
+	req.Params.Name = ts[1]
 	req.Params.Arguments = args
 
 	res, err := cli.CallTool(m.ctx, req)
@@ -220,7 +220,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 
 	// Start assembling a detailed report
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", tool))
+	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", ts[1]))
 	b.WriteString(fmt.Sprintf("  IsError: %v\n", res.IsError))
 
 	if len(res.Content) == 0 {
@@ -370,7 +370,7 @@ Respond *only* with JSON:
 
 	result, err := cli.CallTool(tc.Tool, tc.Arguments)
 	if err != nil {
-		log.Fatalf("Tool call: %v", err)
+		log.Fatalf("Failed invoking Tool call: %v", err)
 	}
 	fmt.Printf("Tool '%s' result:\n%s\n", tc.Tool, result)
 }

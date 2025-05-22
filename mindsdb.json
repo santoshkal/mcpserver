@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mindsDB": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--name=mindsDB-container",
+        "-p 47335:47335",
+        "-p 47337:47337",
+        "-e 'MINDSDB_APIS'='mysql,mcp'",
+        "mindsdb/mindsdb"
+      ]
+    }
+  }
+}
