@@ -2,6 +2,14 @@
   "mcpServers": {
     "mindsDB": {
       "url": "http://127.0.0.1:47337"
+    },
+    "opengrep": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "santoshkal/opengrep-mcp:test"
+      ]
     }
   }
 }

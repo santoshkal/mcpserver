@@ -92,7 +92,6 @@ func NewMultiClient(ctx context.Context, cfg *Config) (*MultiClient, error) {
 		toolToServer:  make(map[string]string),
 		serverDetails: make(map[string]*ServerDetails),
 	}
-
 	for name, sc := range cfg.MCPServers {
 		if !strings.HasSuffix(sc.URL, "/sse") {
 			sc.URL = strings.TrimRight(sc.URL, "/") + "/sse"
@@ -171,7 +170,7 @@ func (m *MultiClient) InitializeAll() error {
 }
 
 // ListAllToolsRaw populates toolToServer
-func (m *MultiClient) ListAllToolsRaw() (map[string][]mcp.Tool, error) {
+func (m *MultiClient) CreateToolToServer() (map[string][]mcp.Tool, error) {
 	all := make(map[string][]mcp.Tool)
 	for name, cli := range m.clients {
 		res, err := cli.ListTools(m.ctx, mcp.ListToolsRequest{})
@@ -188,7 +187,7 @@ func (m *MultiClient) ListAllToolsRaw() (map[string][]mcp.Tool, error) {
 }
 
 func (m *MultiClient) ListToolsJSON() (string, error) {
-	all, err := m.ListAllToolsRaw()
+	all, err := m.CreateToolToServer()
 	if err != nil {
 		return "", err
 	}
