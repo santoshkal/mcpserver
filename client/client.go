@@ -9,10 +9,9 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+	log "github.com/sirupsen/logrus"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
 )
@@ -46,6 +45,7 @@ func (e *SSEClientError) Error() string { return fmt.Sprintf("%s: %s", e.Stage, 
 type Config struct {
 	MCPServers map[string]ServerConfig `json:"mcpServers"`
 }
+
 type ServerConfig struct {
 	URL     string   `json:"url,omitempty"`
 	Command string   `json:"command,omitempty"`
@@ -55,9 +55,8 @@ type ServerConfig struct {
 
 // MultiClient can drive tools on multiple MCP servers
 type MultiClient struct {
-	clients map[string]*mcpclient.Client
-	ctx     context.Context
-	// tool name → server name
+	clients       map[string]*mcpclient.Client
+	ctx           context.Context
 	toolToServer  map[string]string
 	serverDetails map[string]*ServerDetails
 }
@@ -161,7 +160,7 @@ func (m *MultiClient) StartAll() error {
 	if len(upServers) == 0 {
 		return fmt.Errorf("no servers running")
 	}
-	log.Infof("Server '%v' started succussfully", upServers)
+	log.Infof("Server '%v' started successfully", upServers)
 	return nil
 }
 
@@ -222,9 +221,10 @@ func (m *MultiClient) ListToolsJSON() (string, error) {
 
 // CallTool dispatches the right MCPClient.CallTool
 func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error) {
-	srv, ok := m.toolToServer[tool]
+	ts := strings.Split(tool, ".")
+	srv, ok := m.toolToServer[ts[1]]
 	if !ok {
-		return "", &SSEClientError{"CallTool", "no server for tool " + tool}
+		return "", &SSEClientError{"CallTool", "no server for tool " + ts[1]}
 	}
 	cli := m.clients[srv]
 
@@ -234,7 +234,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 			Method: "tools/call",
 		},
 	}
-	req.Params.Name = tool
+	req.Params.Name = ts[1]
 	req.Params.Arguments = args
 
 	res, err := cli.CallTool(m.ctx, req)
@@ -244,7 +244,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 
 	// Start assembling a detailed report
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", tool))
+	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", ts[1]))
 	b.WriteString(fmt.Sprintf("  IsError: %v\n", res.IsError))
 
 	if len(res.Content) == 0 {
@@ -253,7 +253,6 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 	}
 
 	// Iterate every Content entry
-	// NOTE: extract the string output from the res
 	for i, c := range res.Content {
 		b.WriteString(fmt.Sprintf("  Content #%d:\n", i+1))
 		b.WriteString(fmt.Sprintf("  TextContent: %v\n", c))
@@ -297,19 +296,27 @@ type ToolCall struct {
 
 func main() {
 	var (
-		cfgPath = flag.String("config", "", "Path to config.json")
-		baseURL = flag.String("baseurl", "http://localhost:1234/sse", "Single SSE URL")
-		prompt  = flag.String("prompt", "", "What to ask")
+		cfgPath  = flag.String("config", "", "Path to config.json")
+		baseURL  = flag.String("baseurl", "http://localhost:1234/sse", "Single SSE URL")
+		toolName = flag.String("tool", "", "Name of the tool to call")
+		argsJSON = flag.String("arguments", "{}", "JSON string of the tool's arguments")
 	)
 	flag.Parse()
-	if *prompt == "" {
-		log.Fatal("Please supply -prompt")
+
+	if *toolName == "" {
+		log.Fatal("Please supply -tool")
+	}
+
+	// Parse the arguments JSON into a map
+	var userArgs map[string]any
+	if err := json.Unmarshal([]byte(*argsJSON), &userArgs); err != nil {
+		log.Fatalf("Failed to parse -arguments JSON: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// choose multi vs single
+	// Initialize MCP client(s)
 	var cli *MultiClient
 	var err error
 	if *cfgPath != "" {
@@ -319,7 +326,6 @@ func main() {
 		}
 		cli, err = NewMultiClient(ctx, cfg)
 	} else {
-		// wrap a single‐URL config
 		cfg := &Config{
 			MCPServers: map[string]ServerConfig{
 				"default": {URL: *baseURL},
@@ -332,29 +338,43 @@ func main() {
 	}
 	defer cli.Close()
 
-	if err := cli.StartAll(); err != nil {
-		log.Fatalf("StartAll: %v", err)
+	if startErr := cli.StartAll(); startErr != nil {
+		log.Fatalf("StartAll: %v", startErr)
 	}
-	if err := cli.InitializeAll(); err != nil {
-		log.Fatalf("InitializeAll: %v", err)
+	if initErr := cli.InitializeAll(); initErr != nil {
+		log.Fatalf("InitializeAll: %v", initErr)
 	}
 	fmt.Println("[DEBUG] Initialized all servers")
 
+	// List available tools to include in the LLM system prompt
 	toolsJSON, err := cli.ListToolsJSON()
 	if err != nil {
 		log.Fatalf("ListTools: %v", err)
 	}
 
-	// build system prompt...
+	// Build the system prompt with the list of tools
 	systemPrompt := fmt.Sprintf(`
-You are an assistant that invokes tools via MCP.
+You are an assistant that validates and normalizes tool calls for MCP, based on the available tools.
 Here are the available tools:
 %s
-Respond *only* with JSON:
-{"tool":"", "arguments":{}}
+Respond only with JSON matching the schema:
+{"tool":"<tool_name>", "arguments": {<key>: <value>, ...}}
 `, toolsJSON)
 
-	// init LLM
+	// Build the user message containing the raw tool name and arguments
+	inputCall := ToolCall{
+		Tool:      *toolName,
+		Arguments: userArgs,
+	}
+	inputBytes, _ := json.Marshal(inputCall)
+	userPrompt := string(inputBytes)
+
+	history := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+		llms.TextParts(llms.ChatMessageTypeHuman, userPrompt),
+	}
+
+	// Initialize LLM
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("set OPENAI_API_KEY")
@@ -364,10 +384,7 @@ Respond *only* with JSON:
 		log.Fatalf("OpenAI init: %v", err)
 	}
 
-	history := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
-		llms.TextParts(llms.ChatMessageTypeHuman, *prompt),
-	}
+	// Ask the LLM to produce a validated ToolCall JSON
 	resp, err := llm.GenerateContent(ctx, history)
 	if err != nil {
 		log.Fatalf("LLM error: %v", err)
@@ -376,15 +393,15 @@ Respond *only* with JSON:
 	reply := resp.Choices[0].Content
 	fmt.Printf("[DEBUG] LLM reply: %s\n", reply)
 
-	// strip markdown fencing if any
+	// Strip markdown fencing if present
 	clean := reply
 	if parts := strings.Split(reply, "```"); len(parts) > 1 {
 		clean = strings.TrimSpace(parts[1])
 	}
 
 	var tc ToolCall
-	if err := json.Unmarshal([]byte(clean), &tc); err != nil {
-		log.Fatalf("Parse JSON: %v", err)
+	if er := json.Unmarshal([]byte(clean), &tc); er != nil {
+		log.Fatalf("Parse JSON: %v", er)
 	}
 	fmt.Printf("[DEBUG] Parsed tool call: %+v\n", tc)
 
@@ -393,6 +410,7 @@ Respond *only* with JSON:
 		return
 	}
 
+	// Dispatch the validated tool call
 	result, err := cli.CallTool(tc.Tool, tc.Arguments)
 	if err != nil {
 		log.Fatalf("Tool call: %v", err)
