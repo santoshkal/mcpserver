@@ -27,17 +27,17 @@ type jsonRPCRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  struct {
-		Arguments map[string]interface{} `json:"arguments"`
+		Arguments map[string]any `json:"arguments"`
 	} `json:"params"`
-	ID interface{} `json:"id"`
+	ID any `json:"id"`
 }
 
 // jsonRPCResponse defines the structure we return for JSON‑RPC responses.
 type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	ID      interface{} `json:"id"`
+	JSONRPC string `json:"jsonrpc"`
+	Result  any    `json:"result,omitempty"`
+	Error   string `json:"error,omitempty"`
+	ID      any    `json:"id"`
 }
 
 type sseSession struct {
