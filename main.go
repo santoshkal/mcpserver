@@ -45,7 +45,7 @@ func main() {
 			return nil, fmt.Errorf("invalid or missing image parameter")
 		}
 		fmt.Printf("[DEBUG] Executing tool 'pull_image' with image: %s\n", image)
-		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		client, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Docker client: %v", err)
 		}

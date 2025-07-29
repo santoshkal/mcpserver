@@ -221,10 +221,10 @@ func (m *MultiClient) ListToolsJSON() (string, error) {
 
 // CallTool dispatches the right MCPClient.CallTool
 func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error) {
-	// ts := strings.Split(tool, ".")
-	srv, ok := m.toolToServer[tool]
+	ts := strings.Split(tool, ".")
+	srv, ok := m.toolToServer[ts[1]]
 	if !ok {
-		return "", &SSEClientError{"CallTool", "no server for tool " + tool}
+		return "", &SSEClientError{"CallTool", "no server for tool " + ts[1]}
 	}
 	cli := m.clients[srv]
 
@@ -234,7 +234,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 			Method: "tools/call",
 		},
 	}
-	req.Params.Name = tool
+	req.Params.Name = ts[1]
 	req.Params.Arguments = args
 
 	res, err := cli.CallTool(m.ctx, req)
@@ -244,7 +244,7 @@ func (m *MultiClient) CallTool(tool string, args map[string]any) (string, error)
 
 	// Start assembling a detailed report
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", tool))
+	b.WriteString(fmt.Sprintf("Tool '%s' completed.\n", ts[1]))
 	b.WriteString(fmt.Sprintf("  IsError: %v\n", res.IsError))
 
 	if len(res.Content) == 0 {
