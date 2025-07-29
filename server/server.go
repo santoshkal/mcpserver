@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,8 +11,10 @@ import (
 
 	img "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	log "github.com/sirupsen/logrus"
 )
 
 // ToolHandler defines the signature for our tool functions.
@@ -26,17 +27,23 @@ type jsonRPCRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  struct {
-		Arguments map[string]interface{} `json:"arguments"`
+		Arguments map[string]any `json:"arguments"`
 	} `json:"params"`
-	ID interface{} `json:"id"`
+	ID any `json:"id"`
 }
 
 // jsonRPCResponse defines the structure we return for JSON‑RPC responses.
 type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	ID      interface{} `json:"id"`
+	JSONRPC string `json:"jsonrpc"`
+	Result  any    `json:"result,omitempty"`
+	Error   string `json:"error,omitempty"`
+	ID      any    `json:"id"`
+}
+
+type sseSession struct {
+	sessionID           string
+	notificationChannel chan mcp.JSONRPCNotification
+	initialized         bool
 }
 
 var (
@@ -44,16 +51,81 @@ var (
 	toolHandlers = map[string]ToolHandler{}
 )
 
+// Implement the ClientSession interface
+func (s *sseSession) SessionID() string {
+	return s.sessionID
+}
+
+func (s *sseSession) NotificationChannel() chan<- mcp.JSONRPCNotification {
+	return s.notificationChannel
+}
+
+func (s *sseSession) Initialize() {
+	s.initialized = true
+}
+
+func (s sseSession) Initialized() bool {
+	return s.initialized
+}
+
 func main() {
+	log.SetLevel(log.TraceLevel)
+	hooks := &server.Hooks{}
+
+	hooks.AddAfterCallTool(func(
+		ctx context.Context,
+		id any,
+		req *mcp.CallToolRequest,
+		res *mcp.CallToolResult,
+	) {
+		log.Infof("✅ Tool '%v' completed: %v",
+			req.Params.Name,
+			res,
+		)
+	})
+
+	// 2) log *every* MCP method (initialize, list_tools, tools/call, etc.)
+	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		log.Debugf("⮑ Incoming RPC: %s  payload=%#v", method, message)
+	}) // :contentReference[oaicite:0]{index=0}
+
+	// 3) narrow in on tool‐calls if you like
+	hooks.AddBeforeCallTool(func(ctx context.Context, id any, req *mcp.CallToolRequest) {
+		log.Infof("🔧 Calling tool: %s  args=%v", req.Params.Name, req.Params.Arguments)
+	})
+
 	// Create and configure the MCP server.
 	mcpServer = server.NewMCPServer(
 		"MCP Tool STDIO Server",
 		"v1.0.0",
 		server.WithResourceCapabilities(true, true),
 		server.WithLogging(),
+		server.WithHooks(hooks),
 		server.WithPromptCapabilities(false),
 	)
 	mcpServer.AddNotificationHandler("notifications/error", handleNotification)
+
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, res *mcp.InitializeResult) {
+		// We need to send UserAgent details as well
+		sessionID := uuid.New().String()
+		session := &sseSession{
+			sessionID:           sessionID,
+			notificationChannel: make(chan mcp.JSONRPCNotification, 10),
+		}
+		ctx = mcpServer.WithContext(context.Background(), session)
+
+		if err := mcpServer.RegisterSession(ctx, session); err != nil {
+			log.Printf("Failed to register session : %v", err)
+		}
+		err := mcpServer.SendNotificationToSpecificClient(session.SessionID(), "notification/update", map[string]any{"Message:": "New notification"})
+		defer mcpServer.UnregisterSession(ctx, session.SessionID())
+
+		if err != nil {
+			log.Printf("Failed to send notifications: %v", err)
+		}
+	})
+
+	// Tool registrations
 
 	// --- Register the MarkitDown tool ---
 
@@ -282,7 +354,7 @@ func main() {
 	mcpServer.AddTool(gitInitTool, gitInitHandler)
 	toolHandlers["git_init"] = gitInitHandler
 
-	// --- Register the create_table tool ---
+	// --- Register the create_table in Postgres tool ---
 	createTableTool := mcp.NewTool("create_table",
 		mcp.WithDescription("Create a database table in a local Postgres DB instance"),
 		mcp.WithString("table_name",
@@ -321,6 +393,8 @@ func main() {
 	mcpServer.AddTool(createTableTool, createTableHandler)
 	toolHandlers["create_table"] = createTableHandler
 
+	// Register read query using SELECT tool in Sqlite
+
 	readQueryTool := mcp.NewTool("read-query",
 		mcp.WithDescription("Execute a SELECT query on a SQLite DB (returns CSV)"),
 		mcp.WithString("db",
@@ -347,7 +421,7 @@ func main() {
 	mcpServer.AddTool(readQueryTool, readQueryHandler)
 	toolHandlers["read-query"] = readQueryHandler
 
-	// 2) write-query: INSERT/UPDATE/DELETE
+	// write-query too in Sqlite using INSERT/UPDATE/DELETE
 	writeQueryTool := mcp.NewTool("write-query",
 		mcp.WithDescription("Execute INSERT/UPDATE/DELETE on a SQLite DB"),
 		mcp.WithString("db",
@@ -374,7 +448,7 @@ func main() {
 	mcpServer.AddTool(writeQueryTool, writeQueryHandler)
 	toolHandlers["write-query"] = writeQueryHandler
 
-	// 3) create-table: wraps write-query for a CREATE TABLE statement
+	//  create-table tool in Sqlite wraps write-query for a CREATE TABLE statement
 	createSQLTableTool := mcp.NewTool("create-SQLtable",
 		mcp.WithDescription("Create a new table in the SQLite DB"),
 		mcp.WithString("db",
@@ -401,7 +475,7 @@ func main() {
 	mcpServer.AddTool(createSQLTableTool, createSQLTableHandler)
 	toolHandlers["create-table"] = createSQLTableHandler
 
-	// 4) list-tables: query sqlite_master
+	// list-tables tool in Sqlite query
 	listTablesTool := mcp.NewTool("list-tables",
 		mcp.WithDescription("List all tables in the SQLite DB"),
 		mcp.WithString("db",
@@ -419,86 +493,27 @@ func main() {
 				fmt.Sprintf("list-tables failed: %v\n\n%s", err, string(out)),
 			), nil
 		}
-		return mcp.NewToolResultText(string(out)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("'%v' DB contains '%v' table.", db, string(out))), nil
 	}
 	mcpServer.AddTool(listTablesTool, listTablesHandler)
 	toolHandlers["list-tables"] = listTablesHandler
-	// Start HTTP JSON‑RPC endpoint on /rpc.
-	http.HandleFunc("/rpc", rpcHandler)
-	go func() {
-		fmt.Println("HTTP JSON‑RPC server started on port 1234")
-		if err := http.ListenAndServe(":1234", nil); err != nil {
-			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
-			os.Exit(1)
-		}
-	}()
 
-	// Optionally, start the SSE server on another port (1235).
-	sseServer := server.NewSSEServer(mcpServer)
-	if err := sseServer.Start(":1235"); err != nil {
-		fmt.Fprintf(os.Stderr, "SSE server error: %v\n", err)
-	}
+	// Setup the Server
 
-	// Block forever.
-	select {}
-}
+	addr := ":1234"
+	// sse := server.NewSSEServer(mcpServer, server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"))
+	sseServer := server.NewSSEServer(mcpServer, server.WithBaseURL("http://localhost:1234"), server.WithMessageEndpoint("/rpc"), server.WithSSEEndpoint("/sse"), server.WithHTTPServer(&http.Server{
+		Addr: addr,
+	}),
+	)
 
-func rpcHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST supported", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Cannot read request body", http.StatusBadRequest)
-		return
-	}
-
-	var req jsonRPCRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	// Look up the appropriate tool handler.
-	handler, ok := toolHandlers[req.Method]
-	if !ok {
-		http.Error(w, "Unknown method", http.StatusNotFound)
-		return
-	}
-
-	// Create an MCP CallToolRequest, mapping the JSON‑RPC "method"
-	// to the Params.Name field and the provided arguments accordingly.
-	var toolReq mcp.CallToolRequest
-	toolReq.Params.Name = req.Method
-	toolReq.Params.Arguments = req.Params.Arguments
-
-	// Invoke the tool handler.
-	result, err := handler(context.Background(), toolReq)
-	var resp jsonRPCResponse
-	resp.JSONRPC = "2.0"
-	resp.ID = req.ID
-	if err != nil {
-		resp.Error = err.Error()
-	} else {
-		// Extract output text from the Content field.
-		var output string
-		if len(result.Content) > 0 {
-			// Assume the text content is of type *mcp.TextContent.
-			if tc, ok := result.Content[0].(*mcp.TextContent); ok {
-				output = tc.Text
-			} else {
-				// Fallback if the type assertion doesn't match.
-				output = fmt.Sprintf("%v", result.Content[0])
-			}
-		}
-		resp.Result = output
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	// mux := http.NewServeMux()
+	// mux.Handle("/sse", sse.SSEHandler())
+	// mux.Handle("/rpc", sse.MessageHandler())
+	//
+	log.Printf("▶️  Starting MCP HTTP/SSE server 1 on %s ...", addr)
+	if err := http.ListenAndServe(addr, sseServer); err != nil {
+		log.Fatalf("❌  Failed to start server1: %v", err)
 	}
 }
 

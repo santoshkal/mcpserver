@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "GolangServer": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--mount",
+        "type=bind,src=/tmp/my-test-repo,dst=/tmp/my-test-repo",
+        "santoshkal/mcpserver:test"
+      ]
+    },
+    "mindsDB": {
+      "url": "http://127.0.0.1:47337/sse"
+    },
+    "opengrep": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "santoshkal/opengrep-mcp:test"
+      ]
+    }
+  }
+}
